@@ -27,7 +27,7 @@
   - [配置（config.yaml）示例](#配置configyaml示例)
   - [Nginx 反向代理配置参考](#nginx-反向代理配置参考)
   - [注意事项 / 常见问题](#注意事项--常见问题)
-    - [贊助](#贊助)
+    - [赞助](#赞助)
     - [Star](#star)
 
 ---
@@ -572,7 +572,7 @@ server {
 
 ---
 
-### 贊助
+### 赞助
 
 ![photo_2025-09-29_12-36-38](https://github.com/user-attachments/assets/644c2d79-a9ee-4bc6-b9fd-c46ea530a18e)
 
