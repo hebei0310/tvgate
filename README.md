@@ -574,7 +574,7 @@ server {
 
 ### 贊助
 
-![photo_2025-09-29_12-36-38](https://github.com/user-attachments/assets/252d4305-a589-4d04-bff1-47b95496d469)
+![photo_2025-09-29_12-36-38](https://github.com/user-attachments/assets/644c2d79-a9ee-4bc6-b9fd-c46ea530a18e)
 
 ### Star
 
