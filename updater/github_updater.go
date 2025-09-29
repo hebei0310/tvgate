@@ -201,32 +201,57 @@ func UpdateFromGithub(cfg config.GithubConfig, version string) error {
 		return lastErr
 	}
 
+	// 备份当前程序
 	SetStatus("backing_up", "备份当前程序")
-	execPath, _ := os.Executable()
-	backupPath := execPath + ".bak"
-	_ = copyFile(execPath, backupPath)
+	execPath, err := os.Executable()
+	if err != nil {
+		SetStatus("error", fmt.Sprintf("获取可执行文件路径失败: %v", err))
+		return err
+	}
+	
+	backupDir := filepath.Join(filepath.Dir(execPath), "tvgate-backup")
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		SetStatus("error", fmt.Sprintf("创建备份目录失败: %v", err))
+		return err
+	}
+
+	backupName := filepath.Base(execPath)
+	backupPath := filepath.Join(backupDir, backupName)
+
+	// 将当前可执行文件移动到备份目录
+	// 在Windows系统上，正在运行的文件无法被删除或覆盖，所以必须先移动
+	if err := os.Rename(execPath, backupPath); err != nil {
+		SetStatus("error", fmt.Sprintf("备份失败: %v", err))
+		return err
+	}
+	
+	// 设置备份文件权限
 	_ = os.Chmod(backupPath, 0755)
 
+	// 解压新版本
 	SetStatus("unzipping", "解压新版本")
 	tmpDestDir := filepath.Join(filepath.Dir(execPath), ".tmp_upgrade")
 	_ = os.RemoveAll(tmpDestDir)
 	_ = os.MkdirAll(tmpDestDir, 0755)
 
 	if err := unzip(tmpFile, tmpDestDir); err != nil {
+		SetStatus("error", fmt.Sprintf("解压失败: %v", err))
 		return err
 	}
+
+	// 新可执行文件路径
 	newapp := fmt.Sprintf("TVGate-%s-%s", arch.GOOS, arch.PackageArch)
+	if runtime.GOOS == "windows" {
+		newapp += ".exe"
+	}
 	newExecPath := filepath.Join(tmpDestDir, filepath.Base(newapp))
 	if runtime.GOOS != "windows" {
 		_ = os.Chmod(newExecPath, 0755)
 	}
 
+	// 使用 tableflip 升级进程
 	SetStatus("restarting", "重启新版本")
-	// ⚡ 使用 tableflip 启动新进程，旧进程由 tableflip 接管
-	// 在退出前更新状态为成功
 	SetStatus("success", "升级成功，正在重启")
-	// 注意：这里我们不创建新的upgrader，而是使用已有的全局upgrader
-	
 	upgrade.UpgradeProcess(newExecPath, *config.ConfigFilePath, tmpDestDir)
 
 	return nil
@@ -254,11 +279,19 @@ func downloadFile(url, dst string) error {
 }
 
 func copyFile(src, dst string) error {
-	in, _ := os.Open(src)
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
 	defer in.Close()
-	out, _ := os.Create(dst)
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
 	defer out.Close()
-	_, err := io.Copy(out, in)
+
+	_, err = io.Copy(out, in)
 	return err
 }
 
@@ -276,8 +309,15 @@ func unzip(src, dest string) error {
 			continue
 		}
 		_ = os.MkdirAll(filepath.Dir(path), 0755)
-		rc, _ := f.Open()
-		out, _ := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
+		if err != nil {
+			rc.Close()
+			return err
+		}
 		_, _ = io.Copy(out, rc)
 		rc.Close()
 		out.Close()
