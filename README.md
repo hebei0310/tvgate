@@ -18,6 +18,7 @@
     - [方式二：使用 Docker Hub 镜像](#方式二使用-docker-hub-镜像)
     - [udp转发：](#udp转发)
     - [docker-compose 示例](#docker-compose-示例)
+    - [组播 docker-compose 示例](#组播-docker-compose-示例)
   - [服务管理 / 启动脚本](#服务管理--启动脚本)
     - [systemd (Linux)](#systemd-linux)
     - [OpenWrt init 脚本（示例）](#openwrt-init-脚本示例)
@@ -172,6 +173,44 @@ services:
       - /usr/local/TVGate/:/etc/tvgate/
 ```
 
+### 组播 docker-compose 示例
+```yaml
+version: "3"
+services:
+  tvgate:
+    image: ghcr.io/qist/tvgate:latest   # 或 juestnow/tvgate:latest  #不能下载 可以换成 67686372.boown.com/qist/tvgate:latest
+    container_name: tvgate
+    restart: always
+    network_mode: host   # 用宿主机网络，才能收组播
+    volumes:
+      - /usr/local/TVGate/:/etc/tvgate/
+### network_mode: host 后，ports: 配置无效（容器端口=宿主机端口），所以访问时直接用宿主机
+
+方案二：用 macvlan 网络（容器获得局域网真实 IP，更干净）
+
+docker network create -d macvlan \
+  --subnet=192.168.1.0/24 \ # 路由器分配的子网
+  --gateway=192.168.1.1 \ # 路由器分配的网关
+  -o parent=eth0 tvgate_net
+
+version: "3"
+services:
+  tvgate:
+    image: ghcr.io/qist/tvgate:latest   # 或 juestnow/tvgate:latest  #不能下载 可以换成 67686372.boown.com/qist/tvgate:latest
+    container_name: tvgate
+    restart: always
+    networks:
+      tvgate_net:
+        ipv4_address: 192.168.1.50   # 分配一个不冲突的固定IP 子网中的没使用的ip
+    volumes:
+      - /usr/local/TVGate/:/etc/tvgate/
+
+networks:
+  tvgate_net:
+    external: true
+    
+## 这样容器会直接用 192.168.1.50 在你局域网出现，就能和组播互通。
+```
 运行后可通过 `http://宿主机IP:8888/` 访问。
 
 ---
