@@ -175,40 +175,47 @@ services:
 
 ### 组播 docker-compose 示例
 ```yaml
-version: "3"
+version: "3.8"
+
 services:
   tvgate:
-    image: ghcr.io/qist/tvgate:latest   # 或 juestnow/tvgate:latest  #不能下载 可以换成 67686372.boown.com/qist/tvgate:latest
+    image: ghcr.io/qist/tvgate:latest 
     container_name: tvgate
     restart: always
-    network_mode: host   # 用宿主机网络，才能收组播
     volumes:
       - /usr/local/TVGate/:/etc/tvgate/
-### network_mode: host 后，ports: 配置无效（容器端口=宿主机端口），所以访问时直接用宿主机
-
-方案二：用 macvlan 网络（容器获得局域网真实 IP，更干净）
-
-docker network create -d macvlan \
-  --subnet=192.168.1.0/24 \ # 路由器分配的子网
-  --gateway=192.168.1.1 \ # 路由器分配的网关
-  -o parent=eth0 tvgate_net
-
-version: "3"
-services:
-  tvgate:
-    image: ghcr.io/qist/tvgate:latest   # 或 juestnow/tvgate:latest  #不能下载 可以换成 67686372.boown.com/qist/tvgate:latest
-    container_name: tvgate
-    restart: always
+    # 如果选择 host 模式
+    network_mode: "${NETWORK_MODE:-bridge}"
+    # 如果选择 macvlan 模式，下面的 networks 配置会生效
     networks:
       tvgate_net:
-        ipv4_address: 192.168.1.50   # 分配一个不冲突的固定IP 子网中的没使用的ip
-    volumes:
-      - /usr/local/TVGate/:/etc/tvgate/
+        ipv4_address: ${TVGATE_IP:-192.168.1.50}
 
 networks:
   tvgate_net:
-    external: true
-    
+    driver: macvlan
+    driver_opts:
+      parent: ${PARENT_IF:-eth0}
+    ipam:
+      config:
+        - subnet: ${SUBNET:-192.168.1.0/24}
+          gateway: ${GATEWAY:-192.168.1.1}
+
+# 用 host 模式
+export NETWORK_MODE=host
+docker-compose up -d
+
+# 用 macvlan 模式
+export NETWORK_MODE= # 置空，禁用 host 模式
+export SUBNET=192.168.1.0/24
+export GATEWAY=192.168.1.1
+export PARENT_IF=eth0
+export TVGATE_IP=192.168.1.50
+docker-compose up -d
+
+# NETWORK_MODE=host → 容器直接用宿主机网络，最简单。
+
+# NETWORK_MODE=（空值） → 使用 macvlan，容器有独立 IP。
 ## 这样容器会直接用 192.168.1.50 在你局域网出现，就能和组播互通。
 ```
 运行后可通过 `http://宿主机IP:8888/` 访问。
