@@ -3,21 +3,21 @@ package publisher
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"gopkg.in/yaml.v3"
+	"net/http"
+	"os"
 	"strings"
 	"time"
-	"fmt"
-	"net/http"
-	"gopkg.in/yaml.v3"
-	"os"
-	"net/url"
+	// "net/url"
 )
 
 // SourceConfig 定义流源配置
 type SourceConfig struct {
-	Type      string            `yaml:"type" json:"type"`           // 源类型: rtsp, http等
-	URL       string            `yaml:"url" json:"url"`             // 主源URL
+	Type      string            `yaml:"type" json:"type"`             // 源类型: rtsp, http等
+	URL       string            `yaml:"url" json:"url"`               // 主源URL
 	BackupURL string            `yaml:"backup_url" json:"backup_url"` // 备用源URL
-	Headers   map[string]string `yaml:"headers" json:"headers"`     // 请求头
+	Headers   map[string]string `yaml:"headers" json:"headers"`       // 请求头
 }
 
 // PlayURLs 定义播放地址
@@ -28,36 +28,37 @@ type PlayURLs struct {
 
 // ReceiverConfig 定义接收方配置
 type ReceiverConfig struct {
-	PushURL   string   `yaml:"push_url" json:"push_url"`     // 推流地址
-	PlayURLs  PlayURLs `yaml:"play_urls" json:"play_urls"`   // 播放地址
+	PushURL  string   `yaml:"push_url" json:"push_url"`   // 推流地址
+	PlayURLs PlayURLs `yaml:"play_urls" json:"play_urls"` // 播放地址
 }
 
 // StreamKeyConfig 定义流密钥配置
 type StreamKeyConfig struct {
-	Type       string        `yaml:"type" json:"type"`           // 类型: random, fixed
-	Value      string        `yaml:"value" json:"value"`         // 固定值或生成的值
-	Length     int           `yaml:"length" json:"length"`       // 随机密钥长度
+	Type       string        `yaml:"type" json:"type"`             // 类型: random, fixed
+	Value      string        `yaml:"value" json:"value"`           // 固定值或生成的值
+	Length     int           `yaml:"length" json:"length"`         // 随机密钥长度
 	Expiration string        `yaml:"expiration" json:"expiration"` // 过期时间 (例如: "24h", "720h")
-	expiration time.Duration `yaml:"-" json:"-"`                 // 过期时间的内部表示
-	Generated  time.Time     `yaml:"generated" json:"generated"` // 生成时间
+	expiration time.Duration `yaml:"-" json:"-"`                   // 过期时间的内部表示
+	Generated  time.Time     `yaml:"generated" json:"generated"`   // 生成时间
 }
 
 // StreamConfig 定义单个流配置
 type StreamConfig struct {
-	Source        SourceConfig             `yaml:"source" json:"source"`               // 源配置
-	LocalPlayURLs PlayURLs                 `yaml:"local_play_urls" json:"local_play_urls"` // 本地播放地址
-	Mode          string                   `yaml:"mode" json:"mode"`                   // 模式: primary-backup, all
-	Receivers     map[string]ReceiverConfig `yaml:"receivers" json:"receivers"`         // 接收方配置
+	Source        SourceConfig              `yaml:"source" json:"source"`                   // 源配置
+	LocalPlayURLs PlayURLs                  `yaml:"local_play_urls" json:"local_play_urls"` // 本地播放地址
+	Mode          string                    `yaml:"mode" json:"mode"`                       // 模式: primary-backup, all
+	Receivers     map[string]ReceiverConfig `yaml:"receivers" json:"receivers"`             // 接收方配置
 }
 
 // Config 推流器配置
 type Config struct {
-	Protocol   string         `yaml:"protocol" json:"protocol"`     // 推流协议: go, ffmpeg
-	BufferSize int            `yaml:"buffer_size" json:"buffer_size"` // 缓冲区大小
-	Enabled    bool           `yaml:"enabled" json:"enabled"`       // 是否启用
-	StreamKey  StreamKeyConfig `yaml:"streamkey" json:"streamkey"`   // 流密钥配置
-	Stream     StreamConfig   `yaml:"stream" json:"stream"`         // 流配置
-	ConfigPath string         `yaml:"-" json:"-"`                  // 配置文件路径
+	Path       string          `yaml:"path" json:"path"`               // 新增 path
+	Protocol   string          `yaml:"protocol" json:"protocol"`       // 推流协议: go, ffmpeg
+	BufferSize int             `yaml:"buffer_size" json:"buffer_size"` // 缓冲区大小
+	Enabled    bool            `yaml:"enabled" json:"enabled"`         // 是否启用
+	StreamKey  StreamKeyConfig `yaml:"streamkey" json:"streamkey"`     // 流密钥配置
+	Stream     StreamConfig    `yaml:"stream" json:"stream"`           // 流配置
+	ConfigPath string          `yaml:"-" json:"-"`                     // 配置文件路径
 }
 
 // DefaultConfig 返回默认配置
@@ -105,92 +106,6 @@ func DefaultConfig() Config {
 	}
 }
 
-// replaceStreamKeyInURL 替换 URL 中的最后一段为新的 streamkey
-func replaceStreamKeyInURL(rawURL, newKey string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) > 0 {
-		// 移除最后一部分（旧的流密钥），添加新的流密钥
-		parts[len(parts)-1] = newKey
-		u.Path = "/" + strings.Join(parts, "/")
-	}
-
-	return u.String()
-}
-
-// updateStreamKeyInConfig 更新配置中的所有流密钥相关URL
-func (c *Config) updateStreamKeyInConfig(oldKey, newKey string) *Config {
-	// 创建配置副本
-	config := &Config{
-		Protocol:   c.Protocol,
-		BufferSize: c.BufferSize,
-		Enabled:    c.Enabled,
-		StreamKey:  c.StreamKey,
-		Stream: StreamConfig{
-			Source: SourceConfig{
-				Type:      c.Stream.Source.Type,
-				URL:       c.Stream.Source.URL,
-				BackupURL: c.Stream.Source.BackupURL,
-				Headers:   make(map[string]string),
-			},
-			LocalPlayURLs: PlayURLs{
-				FLV: c.Stream.LocalPlayURLs.FLV,
-				HLS: c.Stream.LocalPlayURLs.HLS,
-			},
-			Mode:      c.Stream.Mode,
-			Receivers: make(map[string]ReceiverConfig),
-		},
-		ConfigPath: c.ConfigPath,
-	}
-	
-	// 复制Headers
-	for key, value := range c.Stream.Source.Headers {
-		config.Stream.Source.Headers[key] = value
-	}
-	
-	// 更新本地播放URLs
-	if config.Stream.LocalPlayURLs.FLV != "" && oldKey != "" {
-		config.Stream.LocalPlayURLs.FLV = strings.ReplaceAll(config.Stream.LocalPlayURLs.FLV, oldKey, newKey)
-	}
-	
-	if config.Stream.LocalPlayURLs.HLS != "" && oldKey != "" {
-		config.Stream.LocalPlayURLs.HLS = strings.ReplaceAll(config.Stream.LocalPlayURLs.HLS, oldKey, newKey)
-	}
-	
-	// 更新接收方配置
-	for name, receiver := range c.Stream.Receivers {
-		newReceiver := ReceiverConfig{
-			PushURL: receiver.PushURL,
-			PlayURLs: PlayURLs{
-				FLV: receiver.PlayURLs.FLV,
-				HLS: receiver.PlayURLs.HLS,
-			},
-		}
-		
-		// 更新推流URL
-		if newReceiver.PushURL != "" && oldKey != "" {
-			newReceiver.PushURL = strings.ReplaceAll(newReceiver.PushURL, oldKey, newKey)
-		}
-		
-		// 更新播放URLs
-		if newReceiver.PlayURLs.FLV != "" && oldKey != "" {
-			newReceiver.PlayURLs.FLV = strings.ReplaceAll(newReceiver.PlayURLs.FLV, oldKey, newKey)
-		}
-		
-		if newReceiver.PlayURLs.HLS != "" && oldKey != "" {
-			newReceiver.PlayURLs.HLS = strings.ReplaceAll(newReceiver.PlayURLs.HLS, oldKey, newKey)
-		}
-		
-		config.Stream.Receivers[name] = newReceiver
-	}
-	
-	return config
-}
-
 // GenerateStreamKey 生成或获取流密钥
 func (c *Config) GenerateStreamKey() string {
 	// 检查是否为固定密钥
@@ -201,7 +116,7 @@ func (c *Config) GenerateStreamKey() string {
 		c.SaveConfig()
 		return c.StreamKey.Value
 	}
-	
+
 	// 检查是否存在现有密钥
 	if c.StreamKey.Value != "" {
 		// 解析过期时间
@@ -210,7 +125,7 @@ func (c *Config) GenerateStreamKey() string {
 				c.StreamKey.expiration = exp
 			}
 		}
-		
+
 		// 检查是否过期
 		if c.StreamKey.expiration > 0 && !c.StreamKey.Generated.IsZero() {
 			if time.Since(c.StreamKey.Generated) < c.StreamKey.expiration {
@@ -228,13 +143,13 @@ func (c *Config) GenerateStreamKey() string {
 			return c.StreamKey.Value
 		}
 	}
-	
+
 	// 生成随机密钥
 	length := c.StreamKey.Length
 	if length <= 0 {
 		length = 16
 	}
-	
+
 	bytes := make([]byte, length/2)
 	if _, err := rand.Read(bytes); err != nil {
 		// 如果随机生成失败，使用时间戳
@@ -245,16 +160,16 @@ func (c *Config) GenerateStreamKey() string {
 		c.SaveConfig()
 		return streamKey
 	}
-	
+
 	streamKey := hex.EncodeToString(bytes)
-	
+
 	// 更新配置中的值和生成时间
 	c.StreamKey.Value = streamKey
 	c.StreamKey.Generated = time.Now()
-	
+
 	// 保存配置到文件
 	c.SaveConfig()
-	
+
 	return streamKey
 }
 
@@ -264,12 +179,12 @@ func (c *Config) IsStreamKeyExpired() bool {
 	if c.StreamKey.Type == "fixed" {
 		return false
 	}
-	
+
 	// 没有设置过期时间，永不过期
 	if c.StreamKey.Expiration == "0" {
 		return false
 	}
-	
+
 	// 解析过期时间
 	if c.StreamKey.expiration == 0 {
 		exp, err := time.ParseDuration(c.StreamKey.Expiration)
@@ -278,7 +193,7 @@ func (c *Config) IsStreamKeyExpired() bool {
 		}
 		c.StreamKey.expiration = exp
 	}
-	
+
 	// 检查是否过期
 	return !c.StreamKey.Generated.IsZero() && time.Since(c.StreamKey.Generated) >= c.StreamKey.expiration
 }
@@ -289,23 +204,23 @@ func (c *Config) SaveConfig() error {
 	if c.ConfigPath == "" {
 		return nil
 	}
-	
+
 	// 读取原始配置文件
 	data, err := os.ReadFile(c.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("读取配置文件失败: %v", err)
 	}
-	
+
 	// 解析YAML
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return fmt.Errorf("解析配置文件失败: %v", err)
 	}
-	
+
 	// 注意：由于缺少streamID，我们无法直接更新特定流的配置
 	// 实际的保存应该在StreamPublisher中实现，这里仅作占位符
 	// 在StreamPublisher中会调用SaveStreamKeyToConfig方法来完成实际的保存工作
-	
+
 	return nil
 }
 
@@ -341,12 +256,12 @@ func (c *Config) ReplacePlaceholders(streamKey string) *Config {
 		},
 		ConfigPath: c.ConfigPath,
 	}
-	
+
 	// 复制Headers
 	for key, value := range c.Stream.Source.Headers {
 		config.Stream.Source.Headers[key] = value
 	}
-	
+
 	// 从接收方的推流URL中提取旧的流密钥
 	oldStreamKey := ""
 	for _, receiver := range c.Stream.Receivers {
@@ -357,23 +272,23 @@ func (c *Config) ReplacePlaceholders(streamKey string) *Config {
 			}
 		}
 	}
-	
+
 	fmt.Printf("Extracted old stream key from push URLs: %s\n", oldStreamKey)
 	fmt.Printf("Using new stream key: %s\n", streamKey)
-	
+
 	// 替换源URL中的旧流密钥
 	if oldStreamKey != "" {
 		config.Stream.Source.URL = strings.ReplaceAll(config.Stream.Source.URL, oldStreamKey, streamKey)
 		config.Stream.Source.BackupURL = strings.ReplaceAll(config.Stream.Source.BackupURL, oldStreamKey, streamKey)
 	}
-	
+
 	// 替换Headers中的旧流密钥
 	for key, value := range config.Stream.Source.Headers {
 		if oldStreamKey != "" {
 			config.Stream.Source.Headers[key] = strings.ReplaceAll(value, oldStreamKey, streamKey)
 		}
 	}
-	
+
 	// 处理本地播放URL - 这里需要替换
 	if oldStreamKey != "" {
 		if config.Stream.LocalPlayURLs.FLV != "" {
@@ -383,10 +298,10 @@ func (c *Config) ReplacePlaceholders(streamKey string) *Config {
 			config.Stream.LocalPlayURLs.HLS = strings.ReplaceAll(config.Stream.LocalPlayURLs.HLS, oldStreamKey, streamKey)
 		}
 	}
-	
-	fmt.Printf("Local play URLs replaced: FLV=%s, HLS=%s\n", 
+
+	fmt.Printf("Local play URLs replaced: FLV=%s, HLS=%s\n",
 		config.Stream.LocalPlayURLs.FLV, config.Stream.LocalPlayURLs.HLS)
-	
+
 	// 替换接收方配置中的旧流密钥
 	for name, receiver := range c.Stream.Receivers {
 		newReceiver := ReceiverConfig{
@@ -396,12 +311,12 @@ func (c *Config) ReplacePlaceholders(streamKey string) *Config {
 				HLS: receiver.PlayURLs.HLS,
 			},
 		}
-		
+
 		// 替换推流URL中的旧流密钥
 		if oldStreamKey != "" && newReceiver.PushURL != "" {
 			newReceiver.PushURL = strings.ReplaceAll(newReceiver.PushURL, oldStreamKey, streamKey)
 		}
-		
+
 		// 替换播放URL中的旧流密钥
 		if oldStreamKey != "" {
 			if newReceiver.PlayURLs.FLV != "" {
@@ -411,22 +326,23 @@ func (c *Config) ReplacePlaceholders(streamKey string) *Config {
 				newReceiver.PlayURLs.HLS = strings.ReplaceAll(newReceiver.PlayURLs.HLS, oldStreamKey, streamKey)
 			}
 		}
-		
+
 		config.Stream.Receivers[name] = newReceiver
-		
+
 		fmt.Printf("Replaced receiver %s: old_key=%s, new_key=%s\n", name, oldStreamKey, streamKey)
 		fmt.Printf("  push_url: %s -> %s\n", receiver.PushURL, newReceiver.PushURL)
 		fmt.Printf("  flv: %s -> %s\n", receiver.PlayURLs.FLV, newReceiver.PlayURLs.FLV)
 		fmt.Printf("  hls: %s -> %s\n", receiver.PlayURLs.HLS, newReceiver.PlayURLs.HLS)
 	}
-	
+
 	return config
 }
+
 // extractKeyFromPushURL 从推流URL中提取流密钥
 func extractKeyFromPushURL(pushURL string) string {
 	// 推流URL通常是这种格式: rtmp://server.com/live/streamkey
 	// 或者: rtmp://server.com/app/streamkey
-	
+
 	// 简单分割方法：按斜杠分割，取最后一部分
 	parts := strings.Split(pushURL, "/")
 	if len(parts) > 0 {
@@ -437,51 +353,8 @@ func extractKeyFromPushURL(pushURL string) string {
 		}
 		return lastPart
 	}
-	
-	return ""
-}
 
-// extractKeyBySplitting 通过简单分割提取流密钥
-func extractKeyBySplitting(urlStr string) string {
-	// 按斜杠分割URL
-	parts := strings.Split(urlStr, "/")
-	if len(parts) > 0 {
-		lastPart := parts[len(parts)-1]
-		// 移除查询参数
-		if strings.Contains(lastPart, "?") {
-			lastPart = strings.Split(lastPart, "?")[0]
-		}
-		return lastPart
-	}
 	return ""
-}
-// isValidStreamKey 检查是否是有效的流密钥
-func isValidStreamKey(key string) bool {
-	if len(key) < 8 || len(key) > 64 {
-		return false
-	}
-	
-	// 检查是否是十六进制字符串
-	if _, err := hex.DecodeString(key); err == nil {
-		return true
-	}
-	
-	// 如果不是十六进制，但包含字母和数字，也认为是有效的
-	for _, r := range key {
-		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' && r != '-' {
-			return false
-		}
-	}
-	
-	return true
-}
-
-// replaceValue 如果 oldKey 非空则替换为 newKey，否则返回原值
-func replaceValue(value, oldKey, newKey string) string {
-	if oldKey == "" || value == "" {
-		return value
-	}
-	return strings.ReplaceAll(value, oldKey, newKey)
 }
 
 // GenerateLocalPlayURLs 动态生成本地播放URL
@@ -490,10 +363,10 @@ func (c *Config) GenerateLocalPlayURLs(r *http.Request, streamKey string) PlayUR
 	if r == nil {
 		return PlayURLs{}
 	}
-	
+
 	scheme := getRequestScheme(r)
 	baseURL := fmt.Sprintf("%s://%s/live", scheme, r.Host)
-	
+
 	return PlayURLs{
 		FLV: fmt.Sprintf("%s/%s.flv", baseURL, streamKey),
 		HLS: fmt.Sprintf("%s/%s.m3u8", baseURL, streamKey),
@@ -506,7 +379,7 @@ func getRequestScheme(r *http.Request) string {
 	if r == nil {
 		return "http"
 	}
-	
+
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 		return proto
 	}
