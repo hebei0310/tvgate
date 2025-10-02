@@ -10,7 +10,7 @@ import (
 	"strings"
 	"gopkg.in/yaml.v3"
 	"os"
-	"net/url"
+	// "net/url"
 )
 
 // StreamPublisher 流推流器结构
@@ -132,6 +132,9 @@ func (sp *StreamPublisher) checkStreamKeyExpirations() {
 			// 保存旧的配置用于后续更新
 			oldConfig := stream.config
 			
+			// 保存旧的streamKey
+			// oldStreamKey := oldConfig.StreamKey.Value
+			
 			// 重新生成流密钥（这会自动保存配置）
 			newStreamKey := oldConfig.GenerateStreamKey()
 			
@@ -215,6 +218,7 @@ func (sp *StreamPublisher) checkStreamKeyExpirations() {
 }
 
 // SaveStreamKeyToConfig 将生成的streamkey保存到配置文件中
+// SaveStreamKeyToConfig 将生成的streamkey保存到配置文件中
 func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *Config) error {
 	// 如果没有配置文件路径，则不保存
 	if sp.configPath == "" {
@@ -236,54 +240,69 @@ func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *Config
 	// 更新publisher配置
 	if publisher, ok := rootConfig["publisher"].(map[string]interface{}); ok {
 		if streamConfig, ok := publisher[streamID].(map[string]interface{}); ok {
-			// 更新streamkey的值和生成时间
+			// 更新streamkey的值、生成时间和过期时间
 			if streamKey, ok := streamConfig["streamkey"].(map[string]interface{}); ok {
 				streamKey["value"] = config.StreamKey.Value
 				streamKey["generated"] = config.StreamKey.Generated.Format(time.RFC3339)
+				streamKey["expiration"] = config.StreamKey.Expiration
 			}
 			
 			// 更新stream配置中的URL
 			if stream, ok := streamConfig["stream"].(map[string]interface{}); ok {
 				// 更新local_play_urls
 				if localPlayURLs, ok := stream["local_play_urls"].(map[string]interface{}); ok {
-					if config.Stream.LocalPlayURLs.FLV != "" {
-						localPlayURLs["flv"] = config.Stream.LocalPlayURLs.FLV
-					}
-					if config.Stream.LocalPlayURLs.HLS != "" {
-						localPlayURLs["hls"] = config.Stream.LocalPlayURLs.HLS
+					localPlayURLs["flv"] = config.Stream.LocalPlayURLs.FLV
+					localPlayURLs["hls"] = config.Stream.LocalPlayURLs.HLS
+				} else {
+					// 如果local_play_urls不存在，创建它
+					stream["local_play_urls"] = map[string]interface{}{
+						"flv": config.Stream.LocalPlayURLs.FLV,
+						"hls": config.Stream.LocalPlayURLs.HLS,
 					}
 				}
 				
 				// 更新receivers中的URL
 				if receivers, ok := stream["receivers"].(map[string]interface{}); ok {
 					for receiverName, receiverData := range config.Stream.Receivers {
+						// 确保receiver存在
+						if _, exists := receivers[receiverName]; !exists {
+							receivers[receiverName] = map[string]interface{}{
+								"push_url":  "",
+								"play_urls": map[string]interface{}{},
+							}
+						}
+						
 						if receiver, ok := receivers[receiverName].(map[string]interface{}); ok {
 							// 更新push_url
-							if receiverData.PushURL != "" {
-								receiver["push_url"] = receiverData.PushURL
-								fmt.Printf("Updated push_url for %s: %s\n", receiverName, receiverData.PushURL)
-							}
+							receiver["push_url"] = receiverData.PushURL
 							
 							// 更新play_urls
+							if _, exists := receiver["play_urls"]; !exists {
+								receiver["play_urls"] = map[string]interface{}{}
+							}
+							
 							if playURLs, ok := receiver["play_urls"].(map[string]interface{}); ok {
-								if receiverData.PlayURLs.FLV != "" {
-									playURLs["flv"] = receiverData.PlayURLs.FLV
-									fmt.Printf("Updated FLV play_url for %s: %s\n", receiverName, receiverData.PlayURLs.FLV)
-								}
-								if receiverData.PlayURLs.HLS != "" {
-									playURLs["hls"] = receiverData.PlayURLs.HLS
-									fmt.Printf("Updated HLS play_url for %s: %s\n", receiverName, receiverData.PlayURLs.HLS)
+								playURLs["flv"] = receiverData.PlayURLs.FLV
+								playURLs["hls"] = receiverData.PlayURLs.HLS
+							} else {
+								// 如果play_urls不是map类型，重新创建
+								receiver["play_urls"] = map[string]interface{}{
+									"flv": receiverData.PlayURLs.FLV,
+									"hls": receiverData.PlayURLs.HLS,
 								}
 							}
 						} else {
-							fmt.Printf("Receiver %s not found in config file\n", receiverName)
+							// 如果receiver不是map类型，重新创建
+							receivers[receiverName] = map[string]interface{}{
+								"push_url": receiverData.PushURL,
+								"play_urls": map[string]interface{}{
+									"flv": receiverData.PlayURLs.FLV,
+									"hls": receiverData.PlayURLs.HLS,
+								},
+							}
 						}
 					}
-				} else {
-					fmt.Printf("Receivers not found in stream config\n")
 				}
-			} else {
-				fmt.Printf("Stream config not found\n")
 			}
 			
 			// 将更新后的配置写回文件
@@ -296,7 +315,9 @@ func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *Config
 				return fmt.Errorf("写入配置文件失败: %v", err)
 			}
 			
-			fmt.Printf("Stream %s configuration saved to config file\n", streamID)
+			fmt.Printf("Stream %s configuration saved to config file with key: %s\n", streamID, config.StreamKey.Value)
+			fmt.Printf("Local play URLs saved: FLV=%s, HLS=%s\n", 
+				config.Stream.LocalPlayURLs.FLV, config.Stream.LocalPlayURLs.HLS)
 			return nil
 		}
 	}
@@ -325,6 +346,7 @@ func (sp *StreamPublisher) Stop() error {
 }
 
 // AddStream 添加流
+// AddStream 添加流
 func (sp *StreamPublisher) AddStream(streamID string, config *Config, r *http.Request) *Stream {
 	sp.streamsMu.Lock()
 	defer sp.streamsMu.Unlock()
@@ -335,30 +357,40 @@ func (sp *StreamPublisher) AddStream(streamID string, config *Config, r *http.Re
 		return nil
 	}
 	
+	// 在生成新密钥之前，从原始配置的推流URL中提取旧的流密钥
+	oldStreamKey := ""
+	for _, receiver := range config.Stream.Receivers {
+		if receiver.PushURL != "" {
+			oldStreamKey = extractKeyFromPushURL(receiver.PushURL)
+			if oldStreamKey != "" {
+				break
+			}
+		}
+	}
+	
+	fmt.Printf("Old stream key extracted from push URLs for %s: %s\n", streamID, oldStreamKey)
+	
 	// 生成或使用流密钥
 	streamKey := config.GenerateStreamKey()
+	fmt.Printf("Generated stream key for %s: %s\n", streamID, streamKey)
 	
-	// 替换配置中的占位符，使用最新的streamKey
+	// 替换配置中的旧流密钥，使用最新的streamKey
 	resolvedConfig := config.ReplacePlaceholders(streamKey)
 	
 	// 生成本地播放URL
-	var req *http.Request
-	if r != nil {
-		req = r
-		// 更新resolvedConfig中的本地播放URL
-		resolvedConfig.Stream.LocalPlayURLs = config.GenerateLocalPlayURLs(req, streamKey)
-	} else {
-		// 创建一个默认的请求用于生成本地播放URL
-		req = &http.Request{
-			Host: "localhost:8080",
-			URL:  &url.URL{Path: "/"},
-		}
-		// 更新resolvedConfig中的本地播放URL
-		resolvedConfig.Stream.LocalPlayURLs = config.GenerateLocalPlayURLs(req, streamKey)
-	}
+	// var req *http.Request
+	// if r != nil {
+		// req = r
+	// }
+	// localPlayURLs := resolvedConfig.GenerateLocalPlayURLs(req, streamKey)
 	
-	// 总是保存配置到文件，确保URL是最新的
-	sp.SaveStreamKeyToConfig(streamID, resolvedConfig)
+	// 更新resolvedConfig中的本地播放URL
+	// resolvedConfig.Stream.LocalPlayURLs = localPlayURLs
+	
+	// 保存配置到文件，确保所有URL都使用最新的streamKey
+	if err := sp.SaveStreamKeyToConfig(streamID, resolvedConfig); err != nil {
+		fmt.Printf("Failed to save stream key to config: %v\n", err)
+	}
 	
 	stream := &Stream{
 		id:             streamID,
@@ -375,49 +407,38 @@ func (sp *StreamPublisher) AddStream(streamID string, config *Config, r *http.Re
 	sp.streams[streamID] = stream
 	
 	// 根据模式添加客户端
-	switch resolvedConfig.Stream.Mode {
-	case "primary-backup":
-		// 添加主推流客户端
-		if primary, exists := resolvedConfig.Stream.Receivers["primary"]; exists && primary.PushURL != "" {
-			client := &Client{
-				id:        fmt.Sprintf("%s-primary", streamID),
-				pushURL:   primary.PushURL,
-				playURLs:  primary.PlayURLs,
-				isPrimary: true,
+	for name, receiver := range resolvedConfig.Stream.Receivers {
+		shouldAdd := false
+		isPrimary := false
+		
+		switch resolvedConfig.Stream.Mode {
+		case "primary-backup":
+			if name == "primary" || name == "backup" {
+				shouldAdd = true
+				isPrimary = (name == "primary")
 			}
-			stream.AddClient(client)
+		case "all":
+			shouldAdd = true
+			isPrimary = (name == "primary")
 		}
 		
-		// 添加备用推流客户端
-		if backup, exists := resolvedConfig.Stream.Receivers["backup"]; exists && backup.PushURL != "" {
+		if shouldAdd && receiver.PushURL != "" {
 			client := &Client{
-				id:        fmt.Sprintf("%s-backup", streamID),
-				pushURL:   backup.PushURL,
-				playURLs:  backup.PlayURLs,
-				isPrimary: false,
+				id:        fmt.Sprintf("%s-%s", streamID, name),
+				pushURL:   receiver.PushURL,
+				playURLs:  receiver.PlayURLs,
+				isPrimary: isPrimary,
 			}
 			stream.AddClient(client)
-		}
-		
-	case "all":
-		// 添加所有接收方
-		for name, receiver := range resolvedConfig.Stream.Receivers {
-			if receiver.PushURL != "" {
-				client := &Client{
-					id:        fmt.Sprintf("%s-%s", streamID, name),
-					pushURL:   receiver.PushURL,
-					playURLs:  receiver.PlayURLs,
-					isPrimary: name == "primary",
-				}
-				stream.AddClient(client)
-			}
+			fmt.Printf("Client %s added to stream %s with push_url=%s\n", client.id, stream.id, client.pushURL)
 		}
 	}
 	
 	// 启动流处理
 	stream.Start()
 	
-	fmt.Printf("Stream %s added with source URL: %s, mode: %s\n", streamID, resolvedConfig.Stream.Source.URL, resolvedConfig.Stream.Mode)
+	fmt.Printf("Stream %s added with source URL: %s, mode: %s, old_key: %s, new_key: %s\n", 
+		streamID, resolvedConfig.Stream.Source.URL, resolvedConfig.Stream.Mode, oldStreamKey, streamKey)
 	
 	return stream
 }

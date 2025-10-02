@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"gopkg.in/yaml.v3"
 	"os"
+	"net/url"
 )
 
 // SourceConfig 定义流源配置
@@ -104,14 +105,108 @@ func DefaultConfig() Config {
 	}
 }
 
-// GenerateStreamKey 生成流密钥
+// replaceStreamKeyInURL 替换 URL 中的最后一段为新的 streamkey
+func replaceStreamKeyInURL(rawURL, newKey string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) > 0 {
+		// 移除最后一部分（旧的流密钥），添加新的流密钥
+		parts[len(parts)-1] = newKey
+		u.Path = "/" + strings.Join(parts, "/")
+	}
+
+	return u.String()
+}
+
+// updateStreamKeyInConfig 更新配置中的所有流密钥相关URL
+func (c *Config) updateStreamKeyInConfig(oldKey, newKey string) *Config {
+	// 创建配置副本
+	config := &Config{
+		Protocol:   c.Protocol,
+		BufferSize: c.BufferSize,
+		Enabled:    c.Enabled,
+		StreamKey:  c.StreamKey,
+		Stream: StreamConfig{
+			Source: SourceConfig{
+				Type:      c.Stream.Source.Type,
+				URL:       c.Stream.Source.URL,
+				BackupURL: c.Stream.Source.BackupURL,
+				Headers:   make(map[string]string),
+			},
+			LocalPlayURLs: PlayURLs{
+				FLV: c.Stream.LocalPlayURLs.FLV,
+				HLS: c.Stream.LocalPlayURLs.HLS,
+			},
+			Mode:      c.Stream.Mode,
+			Receivers: make(map[string]ReceiverConfig),
+		},
+		ConfigPath: c.ConfigPath,
+	}
+	
+	// 复制Headers
+	for key, value := range c.Stream.Source.Headers {
+		config.Stream.Source.Headers[key] = value
+	}
+	
+	// 更新本地播放URLs
+	if config.Stream.LocalPlayURLs.FLV != "" && oldKey != "" {
+		config.Stream.LocalPlayURLs.FLV = strings.ReplaceAll(config.Stream.LocalPlayURLs.FLV, oldKey, newKey)
+	}
+	
+	if config.Stream.LocalPlayURLs.HLS != "" && oldKey != "" {
+		config.Stream.LocalPlayURLs.HLS = strings.ReplaceAll(config.Stream.LocalPlayURLs.HLS, oldKey, newKey)
+	}
+	
+	// 更新接收方配置
+	for name, receiver := range c.Stream.Receivers {
+		newReceiver := ReceiverConfig{
+			PushURL: receiver.PushURL,
+			PlayURLs: PlayURLs{
+				FLV: receiver.PlayURLs.FLV,
+				HLS: receiver.PlayURLs.HLS,
+			},
+		}
+		
+		// 更新推流URL
+		if newReceiver.PushURL != "" && oldKey != "" {
+			newReceiver.PushURL = strings.ReplaceAll(newReceiver.PushURL, oldKey, newKey)
+		}
+		
+		// 更新播放URLs
+		if newReceiver.PlayURLs.FLV != "" && oldKey != "" {
+			newReceiver.PlayURLs.FLV = strings.ReplaceAll(newReceiver.PlayURLs.FLV, oldKey, newKey)
+		}
+		
+		if newReceiver.PlayURLs.HLS != "" && oldKey != "" {
+			newReceiver.PlayURLs.HLS = strings.ReplaceAll(newReceiver.PlayURLs.HLS, oldKey, newKey)
+		}
+		
+		config.Stream.Receivers[name] = newReceiver
+	}
+	
+	return config
+}
+
+// GenerateStreamKey 生成或获取流密钥
 func (c *Config) GenerateStreamKey() string {
-	// 如果配置了固定密钥（value不为空且未过期），直接返回
+	// 检查是否为固定密钥
+	if c.StreamKey.Type == "fixed" {
+		// 更新生成时间（即使密钥不变也要更新时间戳）
+		c.StreamKey.Generated = time.Now()
+		// 保存配置到文件
+		c.SaveConfig()
+		return c.StreamKey.Value
+	}
+	
+	// 检查是否存在现有密钥
 	if c.StreamKey.Value != "" {
 		// 解析过期时间
-		if c.StreamKey.Expiration != "0" && c.StreamKey.expiration == 0 {
-			exp, err := time.ParseDuration(c.StreamKey.Expiration)
-			if err == nil {
+		if c.StreamKey.Expiration != "" && c.StreamKey.expiration == 0 {
+			if exp, err := time.ParseDuration(c.StreamKey.Expiration); err == nil {
 				c.StreamKey.expiration = exp
 			}
 		}
@@ -119,10 +214,17 @@ func (c *Config) GenerateStreamKey() string {
 		// 检查是否过期
 		if c.StreamKey.expiration > 0 && !c.StreamKey.Generated.IsZero() {
 			if time.Since(c.StreamKey.Generated) < c.StreamKey.expiration {
+				// 密钥未过期，但为了确保配置一致性，更新生成时间
+				c.StreamKey.Generated = time.Now()
+				// 保存配置到文件
+				c.SaveConfig()
 				return c.StreamKey.Value
 			}
 		} else {
-			// 永不过期
+			// 永不过期，但为了确保配置一致性，更新生成时间
+			c.StreamKey.Generated = time.Now()
+			// 保存配置到文件
+			c.SaveConfig()
 			return c.StreamKey.Value
 		}
 	}
@@ -136,7 +238,12 @@ func (c *Config) GenerateStreamKey() string {
 	bytes := make([]byte, length/2)
 	if _, err := rand.Read(bytes); err != nil {
 		// 如果随机生成失败，使用时间戳
-		return time.Now().Format("20060102150405")
+		streamKey := time.Now().Format("20060102150405")
+		c.StreamKey.Value = streamKey
+		c.StreamKey.Generated = time.Now()
+		// 保存配置到文件
+		c.SaveConfig()
+		return streamKey
 	}
 	
 	streamKey := hex.EncodeToString(bytes)
@@ -195,21 +302,29 @@ func (c *Config) SaveConfig() error {
 		return fmt.Errorf("解析配置文件失败: %v", err)
 	}
 	
-	// 更新publisher配置
-	// 注意：这里我们无法直接更新配置，因为缺少streamID
-	// 实际的保存应该在StreamPublisher中实现
+	// 注意：由于缺少streamID，我们无法直接更新特定流的配置
+	// 实际的保存应该在StreamPublisher中实现，这里仅作占位符
+	// 在StreamPublisher中会调用SaveStreamKeyToConfig方法来完成实际的保存工作
 	
 	return nil
 }
 
-// ReplacePlaceholders 替换配置中的占位符
+// ReplacePlaceholders 替换配置中的旧流密钥
+// ReplacePlaceholders 替换配置中的旧流密钥
 func (c *Config) ReplacePlaceholders(streamKey string) *Config {
 	// 创建配置副本
 	config := &Config{
 		Protocol:   c.Protocol,
 		BufferSize: c.BufferSize,
 		Enabled:    c.Enabled,
-		StreamKey:  c.StreamKey,
+		StreamKey: StreamKeyConfig{
+			Type:       c.StreamKey.Type,
+			Value:      streamKey, // 使用新的流密钥
+			Length:     c.StreamKey.Length,
+			Expiration: c.StreamKey.Expiration,
+			expiration: c.StreamKey.expiration,
+			Generated:  time.Now(), // 更新生成时间
+		},
 		Stream: StreamConfig{
 			Source: SourceConfig{
 				Type:      c.Stream.Source.Type,
@@ -232,78 +347,141 @@ func (c *Config) ReplacePlaceholders(streamKey string) *Config {
 		config.Stream.Source.Headers[key] = value
 	}
 	
-	// 替换源URL中的占位符
-	config.Stream.Source.URL = strings.ReplaceAll(c.Stream.Source.URL, "$(streamkey.value)", streamKey)
-	config.Stream.Source.BackupURL = strings.ReplaceAll(c.Stream.Source.BackupURL, "$(streamkey.value)", streamKey)
+	// 从接收方的推流URL中提取旧的流密钥
+	oldStreamKey := ""
+	for _, receiver := range c.Stream.Receivers {
+		if receiver.PushURL != "" {
+			oldStreamKey = extractKeyFromPushURL(receiver.PushURL)
+			if oldStreamKey != "" {
+				break
+			}
+		}
+	}
 	
-	// 替换Headers中的占位符
+	fmt.Printf("Extracted old stream key from push URLs: %s\n", oldStreamKey)
+	fmt.Printf("Using new stream key: %s\n", streamKey)
+	
+	// 替换源URL中的旧流密钥
+	if oldStreamKey != "" {
+		config.Stream.Source.URL = strings.ReplaceAll(config.Stream.Source.URL, oldStreamKey, streamKey)
+		config.Stream.Source.BackupURL = strings.ReplaceAll(config.Stream.Source.BackupURL, oldStreamKey, streamKey)
+	}
+	
+	// 替换Headers中的旧流密钥
 	for key, value := range config.Stream.Source.Headers {
-		config.Stream.Source.Headers[key] = strings.ReplaceAll(value, "$(streamkey.value)", streamKey)
-	}
-	
-	// 处理本地播放URL
-	// 如果配置了本地播放URL，则替换占位符；否则保持为空，由系统动态生成
-	if config.Stream.LocalPlayURLs.FLV != "" {
-		config.Stream.LocalPlayURLs.FLV = strings.ReplaceAll(c.Stream.LocalPlayURLs.FLV, "$(streamkey.value)", streamKey)
-		
-		// 如果FLV播放地址以"/"结尾，自动拼接streamKey.flv
-		if strings.HasSuffix(config.Stream.LocalPlayURLs.FLV, "/") {
-			config.Stream.LocalPlayURLs.FLV = config.Stream.LocalPlayURLs.FLV + streamKey + ".flv"
+		if oldStreamKey != "" {
+			config.Stream.Source.Headers[key] = strings.ReplaceAll(value, oldStreamKey, streamKey)
 		}
 	}
 	
-	if config.Stream.LocalPlayURLs.HLS != "" {
-		config.Stream.LocalPlayURLs.HLS = strings.ReplaceAll(c.Stream.LocalPlayURLs.HLS, "$(streamkey.value)", streamKey)
-		
-		// 如果HLS播放地址以"/"结尾，自动拼接streamKey.m3u8
-		if strings.HasSuffix(config.Stream.LocalPlayURLs.HLS, "/") {
-			config.Stream.LocalPlayURLs.HLS = config.Stream.LocalPlayURLs.HLS + streamKey + ".m3u8"
+	// 处理本地播放URL - 这里需要替换
+	if oldStreamKey != "" {
+		if config.Stream.LocalPlayURLs.FLV != "" {
+			config.Stream.LocalPlayURLs.FLV = strings.ReplaceAll(config.Stream.LocalPlayURLs.FLV, oldStreamKey, streamKey)
+		}
+		if config.Stream.LocalPlayURLs.HLS != "" {
+			config.Stream.LocalPlayURLs.HLS = strings.ReplaceAll(config.Stream.LocalPlayURLs.HLS, oldStreamKey, streamKey)
 		}
 	}
 	
-	// 替换接收方配置中的占位符
+	fmt.Printf("Local play URLs replaced: FLV=%s, HLS=%s\n", 
+		config.Stream.LocalPlayURLs.FLV, config.Stream.LocalPlayURLs.HLS)
+	
+	// 替换接收方配置中的旧流密钥
 	for name, receiver := range c.Stream.Receivers {
-		// 处理推流地址
-		pushURL := strings.ReplaceAll(receiver.PushURL, "$(streamkey.value)", streamKey)
-		
-		// 如果推流地址以"/"结尾，自动拼接streamKey
-		if strings.HasSuffix(pushURL, "/") {
-			pushURL = pushURL + streamKey
-		}
-		
-		// 处理播放地址
-		playURLs := PlayURLs{}
-		
-		// 处理FLV播放地址
-		if receiver.PlayURLs.FLV != "" {
-			flvURL := strings.ReplaceAll(receiver.PlayURLs.FLV, "$(streamkey.value)", streamKey)
-			
-			// 如果FLV播放地址以"/"结尾，自动拼接streamKey.flv
-			if strings.HasSuffix(flvURL, "/") {
-				flvURL = flvURL + streamKey + ".flv"
-			}
-			playURLs.FLV = flvURL
-		}
-		
-		// 处理HLS播放地址
-		if receiver.PlayURLs.HLS != "" {
-			hlsURL := strings.ReplaceAll(receiver.PlayURLs.HLS, "$(streamkey.value)", streamKey)
-			
-			// 如果HLS播放地址以"/"结尾，自动拼接streamKey.m3u8
-			if strings.HasSuffix(hlsURL, "/") {
-				hlsURL = hlsURL + streamKey + ".m3u8"
-			}
-			playURLs.HLS = hlsURL
-		}
-		
 		newReceiver := ReceiverConfig{
-			PushURL:  pushURL,
-			PlayURLs: playURLs,
+			PushURL: receiver.PushURL,
+			PlayURLs: PlayURLs{
+				FLV: receiver.PlayURLs.FLV,
+				HLS: receiver.PlayURLs.HLS,
+			},
 		}
+		
+		// 替换推流URL中的旧流密钥
+		if oldStreamKey != "" && newReceiver.PushURL != "" {
+			newReceiver.PushURL = strings.ReplaceAll(newReceiver.PushURL, oldStreamKey, streamKey)
+		}
+		
+		// 替换播放URL中的旧流密钥
+		if oldStreamKey != "" {
+			if newReceiver.PlayURLs.FLV != "" {
+				newReceiver.PlayURLs.FLV = strings.ReplaceAll(newReceiver.PlayURLs.FLV, oldStreamKey, streamKey)
+			}
+			if newReceiver.PlayURLs.HLS != "" {
+				newReceiver.PlayURLs.HLS = strings.ReplaceAll(newReceiver.PlayURLs.HLS, oldStreamKey, streamKey)
+			}
+		}
+		
 		config.Stream.Receivers[name] = newReceiver
+		
+		fmt.Printf("Replaced receiver %s: old_key=%s, new_key=%s\n", name, oldStreamKey, streamKey)
+		fmt.Printf("  push_url: %s -> %s\n", receiver.PushURL, newReceiver.PushURL)
+		fmt.Printf("  flv: %s -> %s\n", receiver.PlayURLs.FLV, newReceiver.PlayURLs.FLV)
+		fmt.Printf("  hls: %s -> %s\n", receiver.PlayURLs.HLS, newReceiver.PlayURLs.HLS)
 	}
 	
 	return config
+}
+// extractKeyFromPushURL 从推流URL中提取流密钥
+func extractKeyFromPushURL(pushURL string) string {
+	// 推流URL通常是这种格式: rtmp://server.com/live/streamkey
+	// 或者: rtmp://server.com/app/streamkey
+	
+	// 简单分割方法：按斜杠分割，取最后一部分
+	parts := strings.Split(pushURL, "/")
+	if len(parts) > 0 {
+		lastPart := parts[len(parts)-1]
+		// 移除可能存在的查询参数
+		if strings.Contains(lastPart, "?") {
+			lastPart = strings.Split(lastPart, "?")[0]
+		}
+		return lastPart
+	}
+	
+	return ""
+}
+
+// extractKeyBySplitting 通过简单分割提取流密钥
+func extractKeyBySplitting(urlStr string) string {
+	// 按斜杠分割URL
+	parts := strings.Split(urlStr, "/")
+	if len(parts) > 0 {
+		lastPart := parts[len(parts)-1]
+		// 移除查询参数
+		if strings.Contains(lastPart, "?") {
+			lastPart = strings.Split(lastPart, "?")[0]
+		}
+		return lastPart
+	}
+	return ""
+}
+// isValidStreamKey 检查是否是有效的流密钥
+func isValidStreamKey(key string) bool {
+	if len(key) < 8 || len(key) > 64 {
+		return false
+	}
+	
+	// 检查是否是十六进制字符串
+	if _, err := hex.DecodeString(key); err == nil {
+		return true
+	}
+	
+	// 如果不是十六进制，但包含字母和数字，也认为是有效的
+	for _, r := range key {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' && r != '-' {
+			return false
+		}
+	}
+	
+	return true
+}
+
+// replaceValue 如果 oldKey 非空则替换为 newKey，否则返回原值
+func replaceValue(value, oldKey, newKey string) string {
+	if oldKey == "" || value == "" {
+		return value
+	}
+	return strings.ReplaceAll(value, oldKey, newKey)
 }
 
 // GenerateLocalPlayURLs 动态生成本地播放URL
