@@ -23,8 +23,6 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
-
-	"github.com/qist/tvgate/publisher"
 )
 
 var (
@@ -313,34 +311,15 @@ func RegisterJXAndProxyMux(mux *http.ServeMux, cfg *config.Config) {
 	if len(cfg.Publisher) > 0 {
 		// 检查是否有启用的publisher
 		enabled := false
-		for name, pubCfg := range cfg.Publisher {
-			// 跳过path字段
-			if name == "path" {
-				continue
-			}
-			
-			// 将interface{}转换为map[string]interface{}并检查enabled字段
-			if pubCfgMap, ok := pubCfg.(map[string]interface{}); ok {
-				if enabledVal, ok := pubCfgMap["enabled"]; ok {
-					if enabledBool, ok := enabledVal.(bool); ok && enabledBool {
-						enabled = true
-						break
-					}
-				}
+		for _, pubCfg := range cfg.Publisher {
+			if pubCfg.Enabled {
+				enabled = true
+				break
 			}
 		}
 		
 		if enabled {
-			// 获取publisher路径
-			publisherPath := "/publisher"
-			if pathVal, ok := cfg.Publisher["path"]; ok {
-				if pathStr, ok := pathVal.(string); ok {
-					publisherPath = pathStr
-				}
-			}
-			
-			// 注册publisher处理器（暂时使用nil，实际会在main.go中设置）
-			mux.Handle(publisherPath+"/", publisher.NewHTTPHandler(nil))
+			// Publisher路由将在main.go中注册，因为需要publisher实例
 		}
 	}
 
@@ -372,4 +351,20 @@ func RegisterJXAndProxyMux(mux *http.ServeMux, cfg *config.Config) {
 func RegisterFullMux(mux *http.ServeMux, cfg *config.Config) {
 	RegisterMonitorWebMux(mux, cfg)
 	RegisterJXAndProxyMux(mux, cfg)
+	
+	// 注册publisher路由
+	if len(cfg.Publisher) > 0 {
+		// 检查是否有启用的publisher
+		enabled := false
+		for _, pubCfg := range cfg.Publisher {
+			if pubCfg.Enabled {
+				enabled = true
+				break
+			}
+		}
+		
+		if enabled {
+			// Publisher路由将在main.go中注册，因为需要publisher实例
+		}
+	}
 }

@@ -7,6 +7,8 @@ import (
 	"flag"
 	"sync"
 	"time"
+	
+	"github.com/qist/tvgate/publisher"
 )
 
 var (
@@ -94,7 +96,7 @@ type Config struct {
 	Reload      int                          `yaml:"reload"`      // 添加 Reload 字段
 
 	// 推流器配置
-	Publisher map[string]interface{} `yaml:"publisher" json:"publisher"`
+	Publisher map[string]publisher.Config `yaml:"publisher" json:"publisher"`
 }
 
 // DNSConfig DNS配置
