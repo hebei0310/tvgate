@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -13,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cloudflare/tableflip"
 	"github.com/qist/tvgate/auth"
 	"github.com/qist/tvgate/clear"
 	"github.com/qist/tvgate/config"
@@ -26,6 +24,8 @@ import (
 	"github.com/qist/tvgate/publisher"
 	"github.com/qist/tvgate/server"
 	"github.com/qist/tvgate/web"
+	
+	"github.com/cloudflare/tableflip"
 )
 
 // 定义任务结构体用于 sync.Pool
@@ -92,34 +92,222 @@ func main() {
 	// 初始化 Publisher 推流器
 	// -------------------------
 	var streamPublishers map[string]*publisher.StreamPublisher
-	if len(config.Cfg.Publisher) > 0 {
-		streamPublishers = make(map[string]*publisher.StreamPublisher)
-		for name, pubConfig := range config.Cfg.Publisher {
-			if pubConfig.Enabled {
-				// 设置配置文件路径
-				pubConfig.ConfigPath = *config.ConfigFilePath
-				streamPublisher, err := publisher.Init(&pubConfig)
-				if err != nil {
-					log.Printf("初始化推流器 %s 失败: %v", name, err)
-				} else {
-					streamPublishers[name] = streamPublisher
-					// 添加流到publisher (使用nil作为HTTP请求，因为这里是在初始化阶段)
-					// 在实际使用中，会在创建流时传入实际的HTTP请求
-					streamPublisher.AddStream(name, &pubConfig, nil)
-					log.Printf("推流器 %s 初始化成功", name)
+	
+	// 检查是否有启用的publisher配置
+	enabled := false
+	for name, pubConfigVal := range config.Cfg.Publisher {
+		// 跳过path字段
+		if name == "path" {
+			continue
+		}
+		
+		// 将interface{}转换为publisher.Config
+		if pubConfigData, ok := pubConfigVal.(map[string]interface{}); ok {
+			// 检查是否启用
+			if enabledVal, ok := pubConfigData["enabled"]; ok {
+				if enabledBool, ok := enabledVal.(bool); ok && enabledBool {
+					enabled = true
+					break
 				}
 			}
 		}
 	}
 	
-	// 注册publisher HTTP处理器
-	if len(streamPublishers) > 0 {
-		// 这里可以注册处理器，但需要决定使用哪个publisher实例
-		// 暂时只使用第一个启用的publisher
-		for _, pub := range streamPublishers {
-			http.Handle("/publisher/", publisher.NewHTTPHandler(pub))
-			break // 只注册第一个
+	// 只有在有启用的publisher时才初始化
+	if enabled {
+		streamPublishers = make(map[string]*publisher.StreamPublisher)
+		for name, pubConfigVal := range config.Cfg.Publisher {
+			// 跳过path字段
+			if name == "path" {
+				continue
+			}
+			
+			// 将interface{}转换为publisher.Config
+			if pubConfigData, ok := pubConfigVal.(map[string]interface{}); ok {
+				// 检查是否启用
+				if enabledVal, ok := pubConfigData["enabled"]; ok {
+					if enabledBool, ok := enabledVal.(bool); ok && enabledBool {
+						// 创建publisher.Config结构
+						pubConfig := publisher.Config{}
+						
+						// 解析配置字段
+						if pathVal, ok := config.Cfg.Publisher["path"]; ok {
+							if pathStr, ok := pathVal.(string); ok {
+								pubConfig.Path = pathStr
+							}
+						}
+						
+						if protocolVal, ok := pubConfigData["protocol"]; ok {
+							if protocolStr, ok := protocolVal.(string); ok {
+								pubConfig.Protocol = protocolStr
+							}
+						}
+						
+						if bufferSizeVal, ok := pubConfigData["buffer_size"]; ok {
+							if bufferSizeFloat, ok := bufferSizeVal.(float64); ok {
+								pubConfig.BufferSize = int(bufferSizeFloat)
+							}
+						}
+						
+						if enabledVal, ok := pubConfigData["enabled"]; ok {
+							if enabledBool, ok := enabledVal.(bool); ok {
+								pubConfig.Enabled = enabledBool
+							}
+						}
+						
+						// 解析StreamKey配置
+						if streamKeyVal, ok := pubConfigData["streamkey"]; ok {
+							if streamKeyData, ok := streamKeyVal.(map[string]interface{}); ok {
+								if typeVal, ok := streamKeyData["type"]; ok {
+									if typeStr, ok := typeVal.(string); ok {
+										pubConfig.StreamKey.Type = typeStr
+									}
+								}
+								if valueVal, ok := streamKeyData["value"]; ok {
+									if valueStr, ok := valueVal.(string); ok {
+										pubConfig.StreamKey.Value = valueStr
+									}
+								}
+								if lengthVal, ok := streamKeyData["length"]; ok {
+									if lengthFloat, ok := lengthVal.(float64); ok {
+										pubConfig.StreamKey.Length = int(lengthFloat)
+									}
+								}
+								if expirationVal, ok := streamKeyData["expiration"]; ok {
+									if expirationStr, ok := expirationVal.(string); ok {
+										pubConfig.StreamKey.Expiration = expirationStr
+									}
+								}
+								if generatedVal, ok := streamKeyData["generated"]; ok {
+									if generatedStr, ok := generatedVal.(string); ok {
+										if generatedTime, err := time.Parse(time.RFC3339, generatedStr); err == nil {
+											pubConfig.StreamKey.Generated = generatedTime
+										}
+									}
+								}
+							}
+						}
+						
+						// 解析Stream配置
+						if streamVal, ok := pubConfigData["stream"]; ok {
+							if streamData, ok := streamVal.(map[string]interface{}); ok {
+								// 解析Source配置
+								if sourceVal, ok := streamData["source"]; ok {
+									if sourceData, ok := sourceVal.(map[string]interface{}); ok {
+										if typeVal, ok := sourceData["type"]; ok {
+											if typeStr, ok := typeVal.(string); ok {
+												pubConfig.Stream.Source.Type = typeStr
+											}
+										}
+										if urlVal, ok := sourceData["url"]; ok {
+											if urlStr, ok := urlVal.(string); ok {
+												pubConfig.Stream.Source.URL = urlStr
+											}
+										}
+										if backupURLVal, ok := sourceData["backup_url"]; ok {
+											if backupURLStr, ok := backupURLVal.(string); ok {
+												pubConfig.Stream.Source.BackupURL = backupURLStr
+											}
+										}
+										if headersVal, ok := sourceData["headers"]; ok {
+											if headersData, ok := headersVal.(map[string]interface{}); ok {
+												pubConfig.Stream.Source.Headers = make(map[string]string)
+												for k, v := range headersData {
+													if vStr, ok := v.(string); ok {
+														pubConfig.Stream.Source.Headers[k] = vStr
+													}
+												}
+											}
+										}
+									}
+								}
+								
+								// 解析LocalPlayURLs配置
+								if localPlayURLsVal, ok := streamData["local_play_urls"]; ok {
+									if localPlayURLsData, ok := localPlayURLsVal.(map[string]interface{}); ok {
+										if flvVal, ok := localPlayURLsData["flv"]; ok {
+											if flvStr, ok := flvVal.(string); ok {
+												pubConfig.Stream.LocalPlayURLs.FLV = flvStr
+											}
+										}
+										if hlsVal, ok := localPlayURLsData["hls"]; ok {
+											if hlsStr, ok := hlsVal.(string); ok {
+												pubConfig.Stream.LocalPlayURLs.HLS = hlsStr
+											}
+										}
+									}
+								}
+								
+								// 解析Mode配置
+								if modeVal, ok := streamData["mode"]; ok {
+									if modeStr, ok := modeVal.(string); ok {
+										pubConfig.Stream.Mode = modeStr
+									}
+								}
+								
+								// 解析Receivers配置
+								if receiversVal, ok := streamData["receivers"]; ok {
+									if receiversData, ok := receiversVal.(map[string]interface{}); ok {
+										pubConfig.Stream.Receivers = make(map[string]publisher.ReceiverConfig)
+										for receiverName, receiverVal := range receiversData {
+											if receiverData, ok := receiverVal.(map[string]interface{}); ok {
+												receiverConfig := publisher.ReceiverConfig{}
+												
+												if pushURLVal, ok := receiverData["push_url"]; ok {
+													if pushURLStr, ok := pushURLVal.(string); ok {
+														receiverConfig.PushURL = pushURLStr
+													}
+												}
+												
+												if playURLsVal, ok := receiverData["play_urls"]; ok {
+													if playURLsData, ok := playURLsVal.(map[string]interface{}); ok {
+														if flvVal, ok := playURLsData["flv"]; ok {
+															if flvStr, ok := flvVal.(string); ok {
+																receiverConfig.PlayURLs.FLV = flvStr
+															}
+														}
+														if hlsVal, ok := playURLsData["hls"]; ok {
+															if hlsStr, ok := hlsVal.(string); ok {
+																receiverConfig.PlayURLs.HLS = hlsStr
+															}
+														}
+													}
+												}
+												
+												pubConfig.Stream.Receivers[receiverName] = receiverConfig
+											}
+										}
+									}
+								}
+							}
+						}
+						
+						// 设置配置文件路径
+						pubConfig.ConfigPath = *config.ConfigFilePath
+						streamPublisher, err := publisher.Init(&pubConfig)
+						if err != nil {
+							log.Printf("初始化推流器 %s 失败: %v", name, err)
+						} else {
+							streamPublishers[name] = streamPublisher
+							// 添加流到publisher (使用nil作为HTTP请求，因为这里是在初始化阶段)
+							// 在实际使用中，会在创建流时传入实际的HTTP请求
+							streamPublisher.AddStream(name, &pubConfig, nil)
+							log.Printf("推流器 %s 初始化成功", name)
+						}
+					}
+				}
+			}
 		}
+		
+		// 获取publisher路径
+		publisherPath := "/publisher"
+		if pathVal, ok := config.Cfg.Publisher["path"]; ok {
+			if pathStr, ok := pathVal.(string); ok {
+				publisherPath = pathStr
+			}
+		}
+		
+		log.Printf("publisher处理器已准备就绪，路径: %s", publisherPath)
 	}
 	
 	// 添加调试信息，确认DNS初始化是否正常工作

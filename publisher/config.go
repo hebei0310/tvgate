@@ -64,6 +64,7 @@ type Config struct {
 // DefaultConfig 返回默认配置
 func DefaultConfig() Config {
 	return Config{
+		Path:       "/publisher",  // 添加默认路径
 		Protocol:   "go",
 		BufferSize: 100,
 		Enabled:    false,
@@ -152,25 +153,86 @@ func (c *Config) GenerateStreamKey() string {
 
 	bytes := make([]byte, length/2)
 	if _, err := rand.Read(bytes); err != nil {
-		// 如果随机生成失败，使用时间戳
-		streamKey := time.Now().Format("20060102150405")
-		c.StreamKey.Value = streamKey
-		c.StreamKey.Generated = time.Now()
-		// 保存配置到文件
-		c.SaveConfig()
-		return streamKey
+		// fallback to math/rand if crypto/rand fails
+		for i := range bytes {
+			bytes[i] = byte(time.Now().UnixNano() >> uint(i%8))
+		}
 	}
-
-	streamKey := hex.EncodeToString(bytes)
-
-	// 更新配置中的值和生成时间
-	c.StreamKey.Value = streamKey
+	
+	key := hex.EncodeToString(bytes)
+	c.StreamKey.Value = key
 	c.StreamKey.Generated = time.Now()
-
+	
 	// 保存配置到文件
 	c.SaveConfig()
+	
+	return key
+}
 
-	return streamKey
+// SaveConfig 保存配置到文件
+func (c *Config) SaveConfig() error {
+	// 如果没有配置文件路径，则不保存
+	if c.ConfigPath == "" {
+		return nil
+	}
+	
+	// 读取原始配置文件
+	data, err := os.ReadFile(c.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("读取配置文件失败: %v", err)
+	}
+	
+	// 解析YAML
+	var rootConfig map[string]interface{}
+	if err := yaml.Unmarshal(data, &rootConfig); err != nil {
+		return fmt.Errorf("解析配置文件失败: %v", err)
+	}
+	
+	// 更新publisher配置
+	if publisher, ok := rootConfig["publisher"].(map[string]interface{}); ok {
+		// 更新path字段
+		publisher["path"] = c.Path
+	}
+	
+	// 将更新后的配置写回文件
+	updatedData, err := yaml.Marshal(rootConfig)
+	if err != nil {
+		return fmt.Errorf("序列化配置失败: %v", err)
+	}
+	
+	if err := os.WriteFile(c.ConfigPath, updatedData, 0644); err != nil {
+		return fmt.Errorf("写入配置文件失败: %v", err)
+	}
+	
+	return nil
+}
+
+// GetPath 获取publisher路径
+func (c *Config) GetPath() string {
+	if c.Path == "" {
+		return "/publisher"
+	}
+	return c.Path
+}
+
+// UnmarshalYAML 自定义YAML解析方法
+func (c *Config) UnmarshalYAML(value *yaml.Node) error {
+	// 先用默认配置填充
+	*c = DefaultConfig()
+	
+	// 解析YAML节点
+	type Alias Config
+	aux := &struct {
+		*Alias
+	}{
+		Alias: (*Alias)(c),
+	}
+	
+	if err := value.Decode(aux); err != nil {
+		return err
+	}
+	
+	return nil
 }
 
 // IsStreamKeyExpired 检查流密钥是否过期
@@ -196,32 +258,6 @@ func (c *Config) IsStreamKeyExpired() bool {
 
 	// 检查是否过期
 	return !c.StreamKey.Generated.IsZero() && time.Since(c.StreamKey.Generated) >= c.StreamKey.expiration
-}
-
-// SaveConfig 保存配置到文件
-func (c *Config) SaveConfig() error {
-	// 如果没有配置文件路径，则不保存
-	if c.ConfigPath == "" {
-		return nil
-	}
-
-	// 读取原始配置文件
-	data, err := os.ReadFile(c.ConfigPath)
-	if err != nil {
-		return fmt.Errorf("读取配置文件失败: %v", err)
-	}
-
-	// 解析YAML
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return fmt.Errorf("解析配置文件失败: %v", err)
-	}
-
-	// 注意：由于缺少streamID，我们无法直接更新特定流的配置
-	// 实际的保存应该在StreamPublisher中实现，这里仅作占位符
-	// 在StreamPublisher中会调用SaveStreamKeyToConfig方法来完成实际的保存工作
-
-	return nil
 }
 
 // ReplacePlaceholders 替换配置中的旧流密钥

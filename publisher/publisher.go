@@ -100,19 +100,40 @@ func (sp *StreamPublisher) Start() error {
 	// 启动过期检查器
 	sp.startExpirationChecker()
 	
-	fmt.Printf("Stream publisher started with protocol %s\n", sp.config.Protocol)
 	return nil
+}
+
+// Stop 停止推流服务
+func (sp *StreamPublisher) Stop() {
+	if !sp.running {
+		return
+	}
+	
+	sp.running = false
+	close(sp.done)
+	
+	// 停止过期检查器
+	if sp.expirationChecker != nil {
+		sp.expirationChecker.Stop()
+	}
+	
+	// 停止所有流
+	sp.streamsMu.Lock()
+	defer sp.streamsMu.Unlock()
+	
+	for _, stream := range sp.streams {
+		stream.Stop()
+	}
 }
 
 // startExpirationChecker 启动过期检查器
 func (sp *StreamPublisher) startExpirationChecker() {
-	sp.expirationChecker = time.NewTicker(1 * time.Minute) // 每分钟检查一次
-	
+	sp.expirationChecker = time.NewTicker(1 * time.Minute)
 	go func() {
 		for {
 			select {
 			case <-sp.expirationChecker.C:
-				sp.checkStreamKeyExpirations()
+				sp.checkStreamKeyExpiration()
 			case <-sp.done:
 				return
 			}
@@ -120,104 +141,185 @@ func (sp *StreamPublisher) startExpirationChecker() {
 	}()
 }
 
-// checkStreamKeyExpirations 检查所有流的streamkey是否过期
-func (sp *StreamPublisher) checkStreamKeyExpirations() {
-	sp.streamsMu.Lock()
-	defer sp.streamsMu.Unlock()
+// checkStreamKeyExpiration 检查流密钥过期
+func (sp *StreamPublisher) checkStreamKeyExpiration() {
+	sp.streamsMu.RLock()
+	streams := make([]*Stream, 0, len(sp.streams))
+	for _, stream := range sp.streams {
+		streams = append(streams, stream)
+	}
+	sp.streamsMu.RUnlock()
 	
-	for streamID, stream := range sp.streams {
-		if stream.config.IsStreamKeyExpired() {
-			fmt.Printf("Stream %s key expired, regenerating...\n", streamID)
-			
-			// 保存旧的配置用于后续更新
-			oldConfig := stream.config
-			
-			// 保存旧的streamKey
-			// oldStreamKey := oldConfig.StreamKey.Value
-			
-			// 重新生成流密钥（这会自动保存配置）
-			newStreamKey := oldConfig.GenerateStreamKey()
-			
-			// 替换配置中的占位符，使用最新的streamKey
-			resolvedConfig := oldConfig.ReplacePlaceholders(newStreamKey)
-			
-			// 生成本地播放URL（使用空请求，后续会根据实际请求动态更新）
-			localPlayURLs := oldConfig.GenerateLocalPlayURLs(nil, newStreamKey)
-			
-			// 更新resolvedConfig中的本地播放URL
-			resolvedConfig.Stream.LocalPlayURLs = localPlayURLs
-			
-			// 保存处理后的配置到文件
-			sp.SaveStreamKeyToConfig(streamID, resolvedConfig)
-			
-			// 停止当前流
-			stream.Stop()
-			
-			// 重新创建流
-			newStream := &Stream{
-				id:            streamID,
-				config:        resolvedConfig,
-				streamKey:     newStreamKey,
-				clients:       make(map[string]*Client),
-				buffer:        make(chan []byte, resolvedConfig.BufferSize),
-				running:       true,
-				done:          make(chan struct{}),
-				publisher:     sp,
-				localPlayURLs: localPlayURLs,
-			}
-			
-			// 根据模式添加客户端
-			switch resolvedConfig.Stream.Mode {
-			case "primary-backup":
-				// 添加主推流客户端
-				if primary, exists := resolvedConfig.Stream.Receivers["primary"]; exists && primary.PushURL != "" {
-					client := &Client{
-						id:        fmt.Sprintf("%s-primary", streamID),
-						pushURL:   primary.PushURL,
-						playURLs:  primary.PlayURLs,
-						isPrimary: true,
-					}
-					newStream.AddClient(client)
-				}
-				
-				// 添加备用推流客户端
-				if backup, exists := resolvedConfig.Stream.Receivers["backup"]; exists && backup.PushURL != "" {
-					client := &Client{
-						id:        fmt.Sprintf("%s-backup", streamID),
-						pushURL:   backup.PushURL,
-						playURLs:  backup.PlayURLs,
-						isPrimary: false,
-					}
-					newStream.AddClient(client)
-				}
-				
-			case "all":
-				// 添加所有接收方
-				for name, receiver := range resolvedConfig.Stream.Receivers {
-					if receiver.PushURL != "" {
-						client := &Client{
-							id:        fmt.Sprintf("%s-%s", streamID, name),
-							pushURL:   receiver.PushURL,
-							playURLs:  receiver.PlayURLs,
-							isPrimary: name == "primary",
-						}
-						newStream.AddClient(client)
-					}
-				}
-			}
-			
-			// 替换旧流
-			sp.streams[streamID] = newStream
-			
-			// 启动新流
-			newStream.Start()
-			
-			fmt.Printf("Stream %s restarted with new key: %s\n", streamID, newStreamKey)
-		}
+	for _, stream := range streams {
+		stream.CheckStreamKeyExpiration()
 	}
 }
 
-// SaveStreamKeyToConfig 将生成的streamkey保存到配置文件中
+// AddStream 添加流
+func (sp *StreamPublisher) AddStream(id string, config *Config, r *http.Request) (*Stream, error) {
+	sp.streamsMu.Lock()
+	defer sp.streamsMu.Unlock()
+	
+	// 检查流是否已存在
+	if existingStream, exists := sp.streams[id]; exists {
+		return existingStream, nil
+	}
+	
+	// 生成或获取流密钥
+	streamKey := config.GenerateStreamKey()
+	
+	// 创建新流
+	stream := &Stream{
+		id:        id,
+		config:    config,
+		streamKey: streamKey,
+		clients:   make(map[string]*Client),
+		buffer:    make(chan []byte, config.BufferSize),
+		running:   false,
+		done:      make(chan struct{}),
+		publisher: sp,
+	}
+	
+	// 构建本地播放URL
+	localFLVURL := ""
+	localHLSURL := ""
+	
+	// 处理本地播放URL
+	if config.Stream.LocalPlayURLs.FLV != "" {
+		if strings.HasSuffix(config.Stream.LocalPlayURLs.FLV, "/") {
+			localFLVURL = fmt.Sprintf("%s%s.flv", config.Stream.LocalPlayURLs.FLV, streamKey)
+		} else {
+			localFLVURL = config.Stream.LocalPlayURLs.FLV
+		}
+	} else {
+		// 自动生成本地播放URL
+		if r != nil {
+			scheme := "http"
+			if r.TLS != nil {
+				scheme = "https"
+			}
+			host := r.Host
+			localFLVURL = fmt.Sprintf("%s://%s%s/play/%s.flv", scheme, host, config.GetPath(), streamKey)
+		}
+	}
+	
+	if config.Stream.LocalPlayURLs.HLS != "" {
+		if strings.HasSuffix(config.Stream.LocalPlayURLs.HLS, "/") {
+			localHLSURL = fmt.Sprintf("%s%s.m3u8", config.Stream.LocalPlayURLs.HLS, streamKey)
+		} else {
+			localHLSURL = config.Stream.LocalPlayURLs.HLS
+		}
+	} else {
+		// 自动生成本地播放URL
+		if r != nil {
+			scheme := "http"
+			if r.TLS != nil {
+				scheme = "https"
+			}
+			host := r.Host
+			localHLSURL = fmt.Sprintf("%s://%s%s/play/%s.m3u8", scheme, host, config.GetPath(), streamKey)
+		}
+	}
+	
+	stream.localPlayURLs = PlayURLs{
+		FLV: localFLVURL,
+		HLS: localHLSURL,
+	}
+	
+	// 根据模式添加客户端
+	receivers := config.Stream.Receivers
+	switch config.Stream.Mode {
+	case "primary-backup":
+		// 添加主推流客户端
+		if primary, exists := receivers["primary"]; exists && primary.PushURL != "" {
+			client := &Client{
+				id:        fmt.Sprintf("%s-primary", id),
+				pushURL:   primary.PushURL,
+				playURLs:  primary.PlayURLs,
+				isPrimary: true,
+			}
+			stream.AddClient(client)
+		}
+		
+		// 添加备用推流客户端
+		if backup, exists := receivers["backup"]; exists && backup.PushURL != "" {
+			client := &Client{
+				id:        fmt.Sprintf("%s-backup", id),
+				pushURL:   backup.PushURL,
+				playURLs:  backup.PlayURLs,
+				isPrimary: false,
+			}
+			stream.AddClient(client)
+		}
+		
+	case "all":
+		// 添加所有接收方
+		for name, receiver := range receivers {
+			if receiver.PushURL != "" {
+				client := &Client{
+					id:        fmt.Sprintf("%s-%s", id, name),
+					pushURL:   receiver.PushURL,
+					playURLs:  receiver.PlayURLs,
+					isPrimary: name == "primary",
+				}
+				stream.AddClient(client)
+			}
+		}
+	}
+	
+	// 保存流密钥到配置文件
+	if err := sp.SaveStreamKeyToConfig(id, config); err != nil {
+		logger.LogPrintf("保存流密钥到配置文件失败: %v", err)
+	}
+	
+	// 保存流到映射中
+	sp.streams[id] = stream
+	
+	// 启动流
+	stream.Start()
+	
+	return stream, nil
+}
+
+// GetStream 获取流
+func (sp *StreamPublisher) GetStream(id string) *Stream {
+	sp.streamsMu.RLock()
+	defer sp.streamsMu.RUnlock()
+	
+	if stream, exists := sp.streams[id]; exists {
+		return stream
+	}
+	return nil
+}
+
+// RemoveStream 移除流
+func (sp *StreamPublisher) RemoveStream(id string) {
+	sp.streamsMu.Lock()
+	defer sp.streamsMu.Unlock()
+	
+	if stream, exists := sp.streams[id]; exists {
+		stream.Stop()
+		delete(sp.streams, id)
+	}
+}
+
+// ListStreams 列出所有流
+func (sp *StreamPublisher) ListStreams() []*Stream {
+	sp.streamsMu.RLock()
+	defer sp.streamsMu.RUnlock()
+	
+	streams := make([]*Stream, 0, len(sp.streams))
+	for _, stream := range sp.streams {
+		streams = append(streams, stream)
+	}
+	return streams
+}
+
+// GetConfig 获取配置
+func (sp *StreamPublisher) GetConfig() *Config {
+	return sp.config
+}
+
 // SaveStreamKeyToConfig 将生成的streamkey保存到配置文件中
 func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *Config) error {
 	// 如果没有配置文件路径，则不保存
@@ -251,13 +353,11 @@ func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *Config
 			if stream, ok := streamConfig["stream"].(map[string]interface{}); ok {
 				// 更新local_play_urls
 				if localPlayURLs, ok := stream["local_play_urls"].(map[string]interface{}); ok {
-					localPlayURLs["flv"] = config.Stream.LocalPlayURLs.FLV
-					localPlayURLs["hls"] = config.Stream.LocalPlayURLs.HLS
-				} else {
-					// 如果local_play_urls不存在，创建它
-					stream["local_play_urls"] = map[string]interface{}{
-						"flv": config.Stream.LocalPlayURLs.FLV,
-						"hls": config.Stream.LocalPlayURLs.HLS,
+					if config.Stream.LocalPlayURLs.FLV != "" {
+						localPlayURLs["flv"] = config.Stream.LocalPlayURLs.FLV
+					}
+					if config.Stream.LocalPlayURLs.HLS != "" {
+						localPlayURLs["hls"] = config.Stream.LocalPlayURLs.HLS
 					}
 				}
 				
@@ -274,7 +374,11 @@ func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *Config
 						
 						if receiver, ok := receivers[receiverName].(map[string]interface{}); ok {
 							// 更新push_url
-							receiver["push_url"] = receiverData.PushURL
+							if receiverData.PushURL != "" {
+								receiver["push_url"] = receiverData.PushURL
+							} else if receiverData.PushURL == "" && receiver["push_url"] == nil {
+								receiver["push_url"] = ""
+							}
 							
 							// 更新play_urls
 							if _, exists := receiver["play_urls"]; !exists {
@@ -282,23 +386,18 @@ func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *Config
 							}
 							
 							if playURLs, ok := receiver["play_urls"].(map[string]interface{}); ok {
-								playURLs["flv"] = receiverData.PlayURLs.FLV
-								playURLs["hls"] = receiverData.PlayURLs.HLS
-							} else {
-								// 如果play_urls不是map类型，重新创建
-								receiver["play_urls"] = map[string]interface{}{
-									"flv": receiverData.PlayURLs.FLV,
-									"hls": receiverData.PlayURLs.HLS,
+								// 确保playURLs对象存在
+								if playURLs == nil {
+									playURLs = map[string]interface{}{}
+									receiver["play_urls"] = playURLs
 								}
-							}
-						} else {
-							// 如果receiver不是map类型，重新创建
-							receivers[receiverName] = map[string]interface{}{
-								"push_url": receiverData.PushURL,
-								"play_urls": map[string]interface{}{
-									"flv": receiverData.PlayURLs.FLV,
-									"hls": receiverData.PlayURLs.HLS,
-								},
+								
+								if receiverData.PlayURLs.FLV != "" {
+									playURLs["flv"] = receiverData.PlayURLs.FLV
+								}
+								if receiverData.PlayURLs.HLS != "" {
+									playURLs["hls"] = receiverData.PlayURLs.HLS
+								}
 							}
 						}
 					}
@@ -315,152 +414,12 @@ func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *Config
 				return fmt.Errorf("写入配置文件失败: %v", err)
 			}
 			
-			fmt.Printf("Stream %s configuration saved to config file with key: %s\n", streamID, config.StreamKey.Value)
-			fmt.Printf("Local play URLs saved: FLV=%s, HLS=%s\n", 
-				config.Stream.LocalPlayURLs.FLV, config.Stream.LocalPlayURLs.HLS)
+			fmt.Printf("Stream %s configuration saved to config file\n", streamID)
 			return nil
 		}
 	}
 	
 	return fmt.Errorf("无法在配置文件中找到stream %s 的配置", streamID)
-}
-
-// Stop 停止推流服务
-func (sp *StreamPublisher) Stop() error {
-	sp.running = false
-	
-	// 停止过期检查器
-	if sp.expirationChecker != nil {
-		sp.expirationChecker.Stop()
-	}
-	close(sp.done)
-	
-	// 停止所有流
-	sp.streamsMu.Lock()
-	for _, stream := range sp.streams {
-		stream.Stop()
-	}
-	sp.streamsMu.Unlock()
-	
-	return nil
-}
-
-// AddStream 添加流
-// AddStream 添加流
-func (sp *StreamPublisher) AddStream(streamID string, config *Config, r *http.Request) *Stream {
-	sp.streamsMu.Lock()
-	defer sp.streamsMu.Unlock()
-	
-	// 检查配置是否为nil
-	if config == nil {
-		logger.LogPrintf("Failed to add stream %s: config is nil", streamID)
-		return nil
-	}
-	
-	// 在生成新密钥之前，从原始配置的推流URL中提取旧的流密钥
-	oldStreamKey := ""
-	for _, receiver := range config.Stream.Receivers {
-		if receiver.PushURL != "" {
-			oldStreamKey = extractKeyFromPushURL(receiver.PushURL)
-			if oldStreamKey != "" {
-				break
-			}
-		}
-	}
-	
-	fmt.Printf("Old stream key extracted from push URLs for %s: %s\n", streamID, oldStreamKey)
-	
-	// 生成或使用流密钥
-	streamKey := config.GenerateStreamKey()
-	fmt.Printf("Generated stream key for %s: %s\n", streamID, streamKey)
-	
-	// 替换配置中的旧流密钥，使用最新的streamKey
-	resolvedConfig := config.ReplacePlaceholders(streamKey)
-	
-	// 生成本地播放URL
-	// var req *http.Request
-	// if r != nil {
-		// req = r
-	// }
-	// localPlayURLs := resolvedConfig.GenerateLocalPlayURLs(req, streamKey)
-	
-	// 更新resolvedConfig中的本地播放URL
-	// resolvedConfig.Stream.LocalPlayURLs = localPlayURLs
-	
-	// 保存配置到文件，确保所有URL都使用最新的streamKey
-	if err := sp.SaveStreamKeyToConfig(streamID, resolvedConfig); err != nil {
-		fmt.Printf("Failed to save stream key to config: %v\n", err)
-	}
-	
-	stream := &Stream{
-		id:             streamID,
-		config:         resolvedConfig,
-		streamKey:      streamKey,
-		clients:        make(map[string]*Client),
-		buffer:         make(chan []byte, resolvedConfig.BufferSize),
-		running:        true,
-		done:           make(chan struct{}),
-		publisher:      sp,
-		localPlayURLs:  resolvedConfig.Stream.LocalPlayURLs,
-	}
-	
-	sp.streams[streamID] = stream
-	
-	// 根据模式添加客户端
-	for name, receiver := range resolvedConfig.Stream.Receivers {
-		shouldAdd := false
-		isPrimary := false
-		
-		switch resolvedConfig.Stream.Mode {
-		case "primary-backup":
-			if name == "primary" || name == "backup" {
-				shouldAdd = true
-				isPrimary = (name == "primary")
-			}
-		case "all":
-			shouldAdd = true
-			isPrimary = (name == "primary")
-		}
-		
-		if shouldAdd && receiver.PushURL != "" {
-			client := &Client{
-				id:        fmt.Sprintf("%s-%s", streamID, name),
-				pushURL:   receiver.PushURL,
-				playURLs:  receiver.PlayURLs,
-				isPrimary: isPrimary,
-			}
-			stream.AddClient(client)
-			fmt.Printf("Client %s added to stream %s with push_url=%s\n", client.id, stream.id, client.pushURL)
-		}
-	}
-	
-	// 启动流处理
-	stream.Start()
-	
-	fmt.Printf("Stream %s added with source URL: %s, mode: %s, old_key: %s, new_key: %s\n", 
-		streamID, resolvedConfig.Stream.Source.URL, resolvedConfig.Stream.Mode, oldStreamKey, streamKey)
-	
-	return stream
-}
-
-// RemoveStream 移除流
-func (sp *StreamPublisher) RemoveStream(streamID string) {
-	sp.streamsMu.Lock()
-	defer sp.streamsMu.Unlock()
-	
-	if stream, exists := sp.streams[streamID]; exists {
-		stream.Stop()
-		delete(sp.streams, streamID)
-		fmt.Printf("Stream %s removed\n", streamID)
-	}
-}
-
-// GetStream 获取流
-func (sp *StreamPublisher) GetStream(streamID string) *Stream {
-	sp.streamsMu.RLock()
-	defer sp.streamsMu.RUnlock()
-	
-	return sp.streams[streamID]
 }
 
 // Start 启动流
@@ -678,7 +637,7 @@ func (s *Stream) processData() {
 	}
 }
 
-// GetClients 获取客户端列表
+// GetClients 获取流的所有客户端
 func (s *Stream) GetClients() []*Client {
 	s.clientsMu.RLock()
 	defer s.clientsMu.RUnlock()
@@ -687,7 +646,6 @@ func (s *Stream) GetClients() []*Client {
 	for _, client := range s.clients {
 		clients = append(clients, client)
 	}
-	
 	return clients
 }
 
@@ -738,5 +696,65 @@ func (s *Stream) HandleLocalPlay(w http.ResponseWriter, r *http.Request) {
 	_, err = io.Copy(w, resp.Body)
 	if err != nil {
 		logger.LogPrintf("Failed to forward stream data: %v", err)
+	}
+}
+
+// CheckStreamKeyExpiration 检查流密钥是否过期并重新生成
+func (s *Stream) CheckStreamKeyExpiration() {
+	// 如果是固定密钥或者没有设置过期时间，直接返回
+	if s.config.StreamKey.Type == "fixed" || s.config.StreamKey.Expiration == "0" {
+		return
+	}
+	
+	// 解析过期时间
+	var expiration time.Duration
+	if s.config.StreamKey.expiration > 0 {
+		expiration = s.config.StreamKey.expiration
+	} else {
+		var err error
+		expiration, err = time.ParseDuration(s.config.StreamKey.Expiration)
+		if err != nil {
+			return
+		}
+		s.config.StreamKey.expiration = expiration
+	}
+	
+	// 检查是否过期
+	if time.Since(s.config.StreamKey.Generated) >= expiration {
+		// 过期了，重新生成密钥
+		oldKey := s.streamKey
+		s.streamKey = s.config.GenerateStreamKey()
+		
+		// 重新构建本地播放URL
+		localFLVURL := ""
+		localHLSURL := ""
+		
+		if s.config.Stream.LocalPlayURLs.FLV != "" {
+			if strings.HasSuffix(s.config.Stream.LocalPlayURLs.FLV, "/") {
+				localFLVURL = fmt.Sprintf("%s%s.flv", s.config.Stream.LocalPlayURLs.FLV, s.streamKey)
+			} else {
+				localFLVURL = s.config.Stream.LocalPlayURLs.FLV
+			}
+		}
+		
+		if s.config.Stream.LocalPlayURLs.HLS != "" {
+			if strings.HasSuffix(s.config.Stream.LocalPlayURLs.HLS, "/") {
+				localHLSURL = fmt.Sprintf("%s%s.m3u8", s.config.Stream.LocalPlayURLs.HLS, s.streamKey)
+			} else {
+				localHLSURL = s.config.Stream.LocalPlayURLs.HLS
+			}
+		}
+		
+		s.localPlayURLs = PlayURLs{
+			FLV: localFLVURL,
+			HLS: localHLSURL,
+		}
+		
+		// 保存新的配置
+		if err := s.publisher.SaveStreamKeyToConfig(s.id, s.config); err != nil {
+			logger.LogPrintf("保存流密钥到配置文件失败: %v", err)
+		}
+		
+		fmt.Printf("Stream %s key updated from %s to %s\n", s.id, oldKey, s.streamKey)
 	}
 }
