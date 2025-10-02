@@ -7,6 +7,8 @@ import (
 	"flag"
 	"sync"
 	"time"
+	
+	"github.com/qist/tvgate/publisher"
 )
 
 var (
@@ -92,6 +94,9 @@ type Config struct {
 	ProxyGroups map[string]*ProxyGroupConfig `yaml:"proxygroups"` // 代理组配置
 	JX          JXConfig                     `yaml:"jx"`          // 视频解析配置
 	Reload      int                          `yaml:"reload"`      // 添加 Reload 字段
+
+	// 推流器配置
+	Publisher map[string]publisher.Config `yaml:"publisher" json:"publisher"`
 }
 
 // DNSConfig DNS配置
@@ -285,6 +290,7 @@ func init() {
 const DefaultDialTimeout = 15 * time.Second
 
 var ErrBrokenPipe = errors.New("broken pipe")
+
 
 func (c *Config) SetDefaults() {
 	// HTTP 默认值

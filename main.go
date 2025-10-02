@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -22,6 +23,7 @@ import (
 	"github.com/qist/tvgate/groupstats"
 	"github.com/qist/tvgate/logger"
 	"github.com/qist/tvgate/monitor"
+	"github.com/qist/tvgate/publisher"
 	"github.com/qist/tvgate/server"
 	"github.com/qist/tvgate/web"
 )
@@ -85,6 +87,40 @@ func main() {
 	// 初始化 DNS 解析器
 	// -------------------------
 	dns.Init()
+	
+	// -------------------------
+	// 初始化 Publisher 推流器
+	// -------------------------
+	var streamPublishers map[string]*publisher.StreamPublisher
+	if len(config.Cfg.Publisher) > 0 {
+		streamPublishers = make(map[string]*publisher.StreamPublisher)
+		for name, pubConfig := range config.Cfg.Publisher {
+			if pubConfig.Enabled {
+				// 设置配置文件路径
+				pubConfig.ConfigPath = *config.ConfigFilePath
+				streamPublisher, err := publisher.Init(&pubConfig)
+				if err != nil {
+					log.Printf("初始化推流器 %s 失败: %v", name, err)
+				} else {
+					streamPublishers[name] = streamPublisher
+					// 添加流到publisher (使用nil作为HTTP请求，因为这里是在初始化阶段)
+					// 在实际使用中，会在创建流时传入实际的HTTP请求
+					streamPublisher.AddStream(name, &pubConfig, nil)
+					log.Printf("推流器 %s 初始化成功", name)
+				}
+			}
+		}
+	}
+	
+	// 注册publisher HTTP处理器
+	if len(streamPublishers) > 0 {
+		// 这里可以注册处理器，但需要决定使用哪个publisher实例
+		// 暂时只使用第一个启用的publisher
+		for _, pub := range streamPublishers {
+			http.Handle("/publisher/", publisher.NewHTTPHandler(pub))
+			break // 只注册第一个
+		}
+	}
 	
 	// 添加调试信息，确认DNS初始化是否正常工作
 	// resolver := dns.GetInstance()
