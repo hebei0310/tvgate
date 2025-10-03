@@ -93,32 +93,137 @@ func main() {
 	// -------------------------
 	var streamPublishers map[string]*publisher.StreamPublisher
 	if len(config.Cfg.Publisher) > 0 {
-		streamPublishers = make(map[string]*publisher.StreamPublisher)
-		for name, pubConfig := range config.Cfg.Publisher {
-			if pubConfig.Enabled {
-				// 设置配置文件路径
-				pubConfig.ConfigPath = *config.ConfigFilePath
-				streamPublisher, err := publisher.Init(&pubConfig)
-				if err != nil {
-					log.Printf("初始化推流器 %s 失败: %v", name, err)
-				} else {
-					streamPublishers[name] = streamPublisher
-					// 添加流到publisher (使用nil作为HTTP请求，因为这里是在初始化阶段)
-					// 在实际使用中，会在创建流时传入实际的HTTP请求
-					streamPublisher.AddStream(name, &pubConfig, nil)
-					log.Printf("推流器 %s 初始化成功", name)
-				}
+		// 解析 publisher 配置
+		pubConfigs := make(map[string]*publisher.StreamItemConfig)
+		publisherPath := "/publisher" // 默认路径
+		
+		// 提取路径配置
+		if pathVal, ok := config.Cfg.Publisher["path"]; ok {
+			if pathStr, ok := pathVal.(string); ok {
+				publisherPath = pathStr
 			}
 		}
-	}
-	
-	// 注册publisher HTTP处理器
-	if len(streamPublishers) > 0 {
-		// 这里可以注册处理器，但需要决定使用哪个publisher实例
-		// 暂时只使用第一个启用的publisher
-		for _, pub := range streamPublishers {
-			http.Handle("/publisher/", publisher.NewHTTPHandler(pub))
-			break // 只注册第一个
+		
+		// 解析流配置
+		for name, pubConfig := range config.Cfg.Publisher {
+			// 跳过 path 字段
+			if name == "path" {
+				continue
+			}
+			
+			// 将 interface{} 转换为 publisher.StreamItemConfig
+			if configMap, ok := pubConfig.(map[string]interface{}); ok {
+				streamConfig := publisher.StreamItemConfig{}
+				
+				// 解析基本字段
+				if protocol, ok := configMap["protocol"].(string); ok {
+					streamConfig.Protocol = protocol
+				}
+				if bufferSize, ok := configMap["buffer_size"].(int); ok {
+					streamConfig.BufferSize = bufferSize
+				}
+				if enabled, ok := configMap["enabled"].(bool); ok {
+					streamConfig.Enabled = enabled
+				}
+				
+				// 解析 streamkey 配置
+				if streamKeyMap, ok := configMap["streamkey"].(map[string]interface{}); ok {
+					streamConfig.StreamKey.Type = getStringValue(streamKeyMap, "type")
+					streamConfig.StreamKey.Value = getStringValue(streamKeyMap, "value")
+					streamConfig.StreamKey.Length = getIntValue(streamKeyMap, "length")
+					streamConfig.StreamKey.Expiration = getStringValue(streamKeyMap, "expiration")
+					if generatedStr := getStringValue(streamKeyMap, "generated"); generatedStr != "" {
+						if generatedTime, err := time.Parse(time.RFC3339, generatedStr); err == nil {
+							streamConfig.StreamKey.Generated = generatedTime
+						}
+					}
+				}
+				
+				// 解析 stream 配置
+				if streamMap, ok := configMap["stream"].(map[string]interface{}); ok {
+					// 解析 source 配置
+					if sourceMap, ok := streamMap["source"].(map[string]interface{}); ok {
+						streamConfig.Stream.Source.Type = getStringValue(sourceMap, "type")
+						streamConfig.Stream.Source.URL = getStringValue(sourceMap, "url")
+						streamConfig.Stream.Source.BackupURL = getStringValue(sourceMap, "backup_url")
+						
+						// 解析 headers
+						if headersMap, ok := sourceMap["headers"].(map[string]interface{}); ok {
+							streamConfig.Stream.Source.Headers = make(map[string]string)
+							for k, v := range headersMap {
+								if strVal, ok := v.(string); ok {
+									streamConfig.Stream.Source.Headers[k] = strVal
+								}
+							}
+						}
+					}
+					
+					// 解析 local_play_urls 配置
+					if localPlayURLsMap, ok := streamMap["local_play_urls"].(map[string]interface{}); ok {
+						streamConfig.Stream.LocalPlayURLs.FLV = getStringValue(localPlayURLsMap, "flv")
+						streamConfig.Stream.LocalPlayURLs.HLS = getStringValue(localPlayURLsMap, "hls")
+					}
+					
+					// 解析 mode
+					if mode, ok := streamMap["mode"].(string); ok {
+						streamConfig.Stream.Mode = mode
+					}
+					
+					// 解析 receivers 配置
+					if receiversMap, ok := streamMap["receivers"].(map[string]interface{}); ok {
+						streamConfig.Stream.Receivers = make(map[string]publisher.ReceiverConfig)
+						for receiverName, receiverData := range receiversMap {
+							if receiverMap, ok := receiverData.(map[string]interface{}); ok {
+								receiverConfig := publisher.ReceiverConfig{}
+								receiverConfig.PushURL = getStringValue(receiverMap, "push_url")
+								
+								// 解析 play_urls
+								if playURLsMap, ok := receiverMap["play_urls"].(map[string]interface{}); ok {
+									receiverConfig.PlayURLs.FLV = getStringValue(playURLsMap, "flv")
+									receiverConfig.PlayURLs.HLS = getStringValue(playURLsMap, "hls")
+								}
+								
+								streamConfig.Stream.Receivers[receiverName] = receiverConfig
+							}
+						}
+					}
+				}
+				
+				pubConfigs[name] = &streamConfig
+			}
+		}
+		
+		// 创建 PublisherConfig
+		publisherConfig := &publisher.PublisherConfig{
+			Path:    publisherPath,
+			Streams: pubConfigs,
+		}
+		
+		// 初始化推流器
+		streamPublisher, err := publisher.Init(publisherConfig)
+		if err != nil {
+			log.Printf("初始化推流器失败: %v", err)
+		} else if streamPublisher != nil {
+			streamPublishers = make(map[string]*publisher.StreamPublisher)
+			// 添加流到publisher
+			for name, pubConfig := range pubConfigs {
+				if pubConfig.Enabled {
+					pubConfig.ConfigPath = *config.ConfigFilePath
+					_, err := streamPublisher.AddStream(name, pubConfig, nil)
+					if err != nil {
+						log.Printf("添加流 %s 失败: %v", name, err)
+					} else {
+						log.Printf("流 %s 添加成功", name)
+						streamPublishers[name] = streamPublisher
+					}
+				}
+			}
+			
+			if len(streamPublishers) > 0 {
+				// 注册publisher HTTP处理器
+				http.Handle(publisherConfig.Path+"/", publisher.NewHTTPHandler(streamPublisher))
+				log.Printf("推流器 HTTP 处理器已注册，路径: %s", publisherConfig.Path)
+			}
 		}
 	}
 	
@@ -290,6 +395,22 @@ func main() {
 
 	<-config.ServerCtx.Done()
 	gracefulShutdown(stopCleaner, stopAccessCleaner, stopProxyStats, stopActiveClients, stopStartSystemStatsUpdater)
+}
+
+// getStringValue 从 map 中获取字符串值
+func getStringValue(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
+}
+
+// getIntValue 从 map 中获取整数值
+func getIntValue(m map[string]interface{}, key string) int {
+	if val, ok := m[key].(int); ok {
+		return val
+	}
+	return 0
 }
 
 func gracefulShutdown(stopCleaner, stopAccessCleaner, stopProxyStats, stopActiveClients, stopStartSystemStatsUpdater chan struct{}) {

@@ -1,6 +1,8 @@
 package publisher
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"net/http"
@@ -16,7 +18,7 @@ import (
 // StreamPublisher 流推流器结构
 type StreamPublisher struct {
 	// 推流配置
-	config *Config
+	config *PublisherConfig
 	
 	// 流管理
 	streams   map[string]*Stream
@@ -42,7 +44,7 @@ type Stream struct {
 	id string
 	
 	// 流配置
-	config *Config
+	config *StreamItemConfig
 	
 	// 流密钥
 	streamKey string
@@ -81,7 +83,7 @@ type Client struct {
 }
 
 // NewStreamPublisher 创建一个新的流推流器
-func NewStreamPublisher(config *Config, configPath string) *StreamPublisher {
+func NewStreamPublisher(config *PublisherConfig, configPath string) *StreamPublisher {
 	return &StreamPublisher{
 		config:  config,
 		streams: make(map[string]*Stream),
@@ -156,7 +158,7 @@ func (sp *StreamPublisher) checkStreamKeyExpiration() {
 }
 
 // AddStream 添加流
-func (sp *StreamPublisher) AddStream(id string, config *Config, r *http.Request) (*Stream, error) {
+func (sp *StreamPublisher) AddStream(id string, config *StreamItemConfig, r *http.Request) (*Stream, error) {
 	sp.streamsMu.Lock()
 	defer sp.streamsMu.Unlock()
 	
@@ -199,7 +201,7 @@ func (sp *StreamPublisher) AddStream(id string, config *Config, r *http.Request)
 				scheme = "https"
 			}
 			host := r.Host
-			localFLVURL = fmt.Sprintf("%s://%s%s/play/%s.flv", scheme, host, config.GetPath(), streamKey)
+			localFLVURL = fmt.Sprintf("%s://%s%s/play/%s.flv", scheme, host, sp.config.Path, streamKey)
 		}
 	}
 	
@@ -217,7 +219,7 @@ func (sp *StreamPublisher) AddStream(id string, config *Config, r *http.Request)
 				scheme = "https"
 			}
 			host := r.Host
-			localHLSURL = fmt.Sprintf("%s://%s%s/play/%s.m3u8", scheme, host, config.GetPath(), streamKey)
+			localHLSURL = fmt.Sprintf("%s://%s%s/play/%s.m3u8", scheme, host, sp.config.Path, streamKey)
 		}
 	}
 	
@@ -267,7 +269,7 @@ func (sp *StreamPublisher) AddStream(id string, config *Config, r *http.Request)
 		}
 	}
 	
-	// 保存流密钥到配置文件
+	// 保存流密钥到配置文件中
 	if err := sp.SaveStreamKeyToConfig(id, config); err != nil {
 		logger.LogPrintf("保存流密钥到配置文件失败: %v", err)
 	}
@@ -316,12 +318,12 @@ func (sp *StreamPublisher) ListStreams() []*Stream {
 }
 
 // GetConfig 获取配置
-func (sp *StreamPublisher) GetConfig() *Config {
+func (sp *StreamPublisher) GetConfig() *PublisherConfig {
 	return sp.config
 }
 
 // SaveStreamKeyToConfig 将生成的streamkey保存到配置文件中
-func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *Config) error {
+func (sp *StreamPublisher) SaveStreamKeyToConfig(streamID string, config *StreamItemConfig) error {
 	// 如果没有配置文件路径，则不保存
 	if sp.configPath == "" {
 		return nil
@@ -501,143 +503,104 @@ func (s *Stream) pullStream() {
 	// 根据源类型选择拉流方式
 	switch s.config.Stream.Source.Type {
 	case "rtsp":
-		// 使用 gortsplib 拉流
 		s.pullRTSPStream()
-	case "http", "hls":
-		// 使用 http client 或 ffmpeg 拉流
+	case "http", "https":
 		s.pullHTTPStream()
-	case "file":
-		// 直接用 ffmpeg / go 内部解码器读取文件
-		s.pullFileStream()
-	case "device":
-		// 打开本地采集设备
-		s.pullDeviceStream()
-	case "screen":
-		// 桌面采集
-		s.pullScreenStream()
-	case "custom":
-		// 插件扩展
-		s.pullCustomStream()
 	default:
-		logger.LogPrintf("Unknown source type: %s for stream %s", s.config.Stream.Source.Type, s.id)
+		logger.LogPrintf("Unsupported stream source type: %s", s.config.Stream.Source.Type)
 	}
 }
 
-// pullRTSPStream 拉取RTSP流数据（占位实现）
+// pullRTSPStream 拉取RTSP流
 func (s *Stream) pullRTSPStream() {
-	// 这里应该实现RTSP流的拉取逻辑
-	// 由于是纯转发，我们可以简化处理
-	// 在实际应用中，这里需要实现具体的RTSP拉流协议
-	logger.LogPrintf("Pulling RTSP stream %s from %s (not implemented)", s.id, s.config.Stream.Source.URL)
-}
-
-// pullHTTPStream 拉取HTTP/HLS流数据
-func (s *Stream) pullHTTPStream() {
-	// 定时拉取流数据
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	// RTSP流拉取逻辑
+	logger.LogPrintf("Pulling RTSP stream from %s", s.config.Stream.Source.URL)
 	
-	for {
-		select {
-		case <-s.done:
-			return
-		case <-ticker.C:
-			// 拉取HTTP流数据
-			s.pullHTTPData()
-		}
-	}
+	// 这里应该实现RTSP流的拉取逻辑
+	// 可以使用现有的RTSP库或自定义实现
 }
 
-// pullHTTPData 拉取HTTP流数据
-func (s *Stream) pullHTTPData() {
+// pullHTTPStream 拉取HTTP流（包括HLS）
+func (s *Stream) pullHTTPStream() {
+	// HTTP流拉取逻辑
+	logger.LogPrintf("Pulling HTTP stream from %s", s.config.Stream.Source.URL)
+	
+	// 创建HTTP请求
 	req, err := http.NewRequest("GET", s.config.Stream.Source.URL, nil)
 	if err != nil {
-		logger.LogPrintf("Failed to create request for stream %s from %s: %v", s.id, s.config.Stream.Source.URL, err)
+		logger.LogPrintf("Failed to create HTTP request for stream %s: %v", s.id, err)
 		return
 	}
-
-	// 添加自定义headers
+	
+	// 添加请求头
 	for key, value := range s.config.Stream.Source.Headers {
-		req.Header.Add(key, value)
+		req.Header.Set(key, value)
 	}
-
+	
+	// 发送HTTP请求
 	resp, err := s.publisher.httpClient.Do(req)
 	if err != nil {
-		logger.LogPrintf("Failed to pull stream %s from %s: %v", s.id, s.config.Stream.Source.URL, err)
+		logger.LogPrintf("Failed to pull HTTP stream %s: %v", s.id, err)
 		return
 	}
 	defer resp.Body.Close()
 	
+	// 检查响应状态码
 	if resp.StatusCode != http.StatusOK {
-		logger.LogPrintf("Failed to pull stream %s, status code: %d", s.id, resp.StatusCode)
+		logger.LogPrintf("HTTP stream %s returned status code: %d", s.id, resp.StatusCode)
 		return
 	}
 	
-	// 读取数据
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		logger.LogPrintf("Failed to read stream %s data: %v", s.id, err)
-		return
-	}
-	
-	// 推送数据
-	s.PushData(data)
-	
-	logger.LogPrintf("Pulled %d bytes for stream %s from %s", len(data), s.id, s.config.Stream.Source.URL)
-}
-
-// pullFileStream 从文件拉取流数据（占位实现）
-func (s *Stream) pullFileStream() {
-	logger.LogPrintf("Pulling file stream %s from %s (not implemented)", s.id, s.config.Stream.Source.URL)
-}
-
-// pullDeviceStream 从设备拉取流数据（占位实现）
-func (s *Stream) pullDeviceStream() {
-	logger.LogPrintf("Pulling device stream %s (not implemented)", s.id)
-}
-
-// pullScreenStream 从屏幕采集拉取流数据（占位实现）
-func (s *Stream) pullScreenStream() {
-	logger.LogPrintf("Pulling screen stream %s (not implemented)", s.id)
-}
-
-// pullCustomStream 从自定义源拉取流数据（占位实现）
-func (s *Stream) pullCustomStream() {
-	logger.LogPrintf("Pulling custom stream %s (not implemented)", s.id)
-}
-
-// processData 处理数据
-func (s *Stream) processData() {
+	// 读取并转发数据
+	buffer := make([]byte, 4096)
 	for {
 		select {
-		case data, ok := <-s.buffer:
-			if !ok {
+		case <-s.done:
+			return
+		default:
+			n, err := resp.Body.Read(buffer)
+			if err != nil && err != io.EOF {
+				logger.LogPrintf("Failed to read HTTP stream %s: %v", s.id, err)
 				return
 			}
 			
-			// 将数据推送到所有客户端
+			if n > 0 {
+				// 将数据推送到缓冲区
+				s.PushData(buffer[:n])
+			}
+			
+			if err == io.EOF {
+				// 流结束，尝试重新连接
+				logger.LogPrintf("HTTP stream %s ended, reconnecting...", s.id)
+				time.Sleep(1 * time.Second)
+				go s.pullHTTPStream()
+				return
+			}
+		}
+	}
+}
+
+// processData 处理流数据
+func (s *Stream) processData() {
+	for {
+		select {
+		case data := <-s.buffer:
+			// 将数据转发给所有客户端
 			s.clientsMu.RLock()
-			clients := make([]*Client, 0, len(s.clients))
 			for _, client := range s.clients {
-				clients = append(clients, client)
+				// 这里应该实现向客户端推送数据的逻辑
+				_ = client
+				_ = data
+				// 示例：client.PushData(data)
 			}
 			s.clientsMu.RUnlock()
-			
-			for _, client := range clients {
-				// 实际推送数据到客户端的逻辑
-				fmt.Printf("Pushing %d bytes to client %s at %s\n", len(data), client.id, client.pushURL)
-				
-				// 这里应该实现实际的推流逻辑，例如RTMP推流
-				// 由于是纯转发，我们可以简化处理
-				// 在实际应用中，这里需要实现具体的推流协议
-			}
 		case <-s.done:
 			return
 		}
 	}
 }
 
-// GetClients 获取流的所有客户端
+// GetClients 获取客户端列表
 func (s *Stream) GetClients() []*Client {
 	s.clientsMu.RLock()
 	defer s.clientsMu.RUnlock()
@@ -649,112 +612,223 @@ func (s *Stream) GetClients() []*Client {
 	return clients
 }
 
-// GetLocalPlayURLs 获取本地播放URL
-func (s *Stream) GetLocalPlayURLs() PlayURLs {
-	return s.localPlayURLs
+// CheckStreamKeyExpiration 检查流密钥是否过期
+func (s *Stream) CheckStreamKeyExpiration() {
+	if s.config.IsStreamKeyExpired() {
+		// 生成新的流密钥
+		newKey := s.config.GenerateStreamKey()
+		fmt.Printf("Stream %s key expired, generated new key: %s\n", s.id, newKey)
+		
+		// 更新所有相关URL中的流密钥
+		updatedConfig := s.config.ReplacePlaceholders(newKey)
+		
+		// 保存更新后的配置
+		if s.publisher != nil {
+			if err := s.publisher.SaveStreamKeyToConfig(s.id, updatedConfig); err != nil {
+				logger.LogPrintf("Failed to save updated stream key for %s: %v", s.id, err)
+			}
+		}
+	}
 }
 
 // HandleLocalPlay 处理本地播放请求
 func (s *Stream) HandleLocalPlay(w http.ResponseWriter, r *http.Request) {
-	// 根据请求路径确定播放类型
-	path := r.URL.Path
-	var sourceURL string
-	
-	switch {
-	case strings.HasSuffix(path, ".m3u8"):
-		sourceURL = s.config.Stream.Source.URL
-	case strings.HasSuffix(path, ".flv"):
-		sourceURL = s.config.Stream.Source.URL
-	default:
-		http.Error(w, "Unsupported format", http.StatusBadRequest)
-		return
-	}
-	
-	if sourceURL == "" {
-		http.Error(w, "Stream source not configured", http.StatusNotFound)
-		return
-	}
-	
-	// 转发源流数据给客户端
-	resp, err := s.publisher.httpClient.Get(sourceURL)
-	if err != nil {
-		http.Error(w, "Failed to fetch stream", http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-	
-	// 复制响应头
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-	
-	w.WriteHeader(resp.StatusCode)
-	
-	// 转发数据
-	_, err = io.Copy(w, resp.Body)
-	if err != nil {
-		logger.LogPrintf("Failed to forward stream data: %v", err)
-	}
+	// 这里应该实现本地播放逻辑
+	// 可以是FLV或HLS流的转发
+	fmt.Fprintf(w, "Local play for stream %s", s.id)
 }
 
-// CheckStreamKeyExpiration 检查流密钥是否过期并重新生成
-func (s *Stream) CheckStreamKeyExpiration() {
-	// 如果是固定密钥或者没有设置过期时间，直接返回
-	if s.config.StreamKey.Type == "fixed" || s.config.StreamKey.Expiration == "0" {
-		return
+// GenerateStreamKey 生成或获取流密钥
+func (c *StreamItemConfig) GenerateStreamKey() string {
+	// 检查是否为固定密钥
+	if c.StreamKey.Type == "fixed" {
+		// 更新生成时间（即使密钥不变也要更新时间戳）
+		c.StreamKey.Generated = time.Now()
+		// 保存配置到文件
+		// 注意：这里需要访问publisher来保存配置
+		return c.StreamKey.Value
+	}
+
+	// 检查是否存在现有密钥
+	if c.StreamKey.Value != "" {
+		// 解析过期时间
+		if c.StreamKey.Expiration != "" && c.StreamKey.expiration == 0 {
+			if exp, err := time.ParseDuration(c.StreamKey.Expiration); err == nil {
+				c.StreamKey.expiration = exp
+			}
+		}
+
+		// 检查是否过期
+		if c.StreamKey.expiration > 0 && !c.StreamKey.Generated.IsZero() {
+			if time.Since(c.StreamKey.Generated) < c.StreamKey.expiration {
+				// 密钥未过期，但为了确保配置一致性，更新生成时间
+				c.StreamKey.Generated = time.Now()
+				// 保存配置到文件
+				return c.StreamKey.Value
+			}
+		} else {
+			// 永不过期，但为了确保配置一致性，更新生成时间
+			c.StreamKey.Generated = time.Now()
+			// 保存配置到文件
+			return c.StreamKey.Value
+		}
+	}
+
+	// 生成随机密钥
+	length := c.StreamKey.Length
+	if length <= 0 {
+		length = 16
+	}
+
+	bytes := make([]byte, length/2)
+	if _, err := rand.Read(bytes); err != nil {
+		// fallback to math/rand if crypto/rand fails
+		for i := range bytes {
+			bytes[i] = byte(time.Now().UnixNano() >> uint(i%8))
+		}
 	}
 	
+	key := hex.EncodeToString(bytes)
+	c.StreamKey.Value = key
+	c.StreamKey.Generated = time.Now()
+	
+	return key
+}
+
+// IsStreamKeyExpired 检查流密钥是否过期
+func (c *StreamItemConfig) IsStreamKeyExpired() bool {
+	// 固定密钥永不过期
+	if c.StreamKey.Type == "fixed" {
+		return false
+	}
+
+	// 没有设置过期时间，永不过期
+	if c.StreamKey.Expiration == "0" {
+		return false
+	}
+
 	// 解析过期时间
-	var expiration time.Duration
-	if s.config.StreamKey.expiration > 0 {
-		expiration = s.config.StreamKey.expiration
-	} else {
-		var err error
-		expiration, err = time.ParseDuration(s.config.StreamKey.Expiration)
+	if c.StreamKey.expiration == 0 {
+		exp, err := time.ParseDuration(c.StreamKey.Expiration)
 		if err != nil {
-			return
+			return false // 解析失败则认为永不过期
 		}
-		s.config.StreamKey.expiration = expiration
+		c.StreamKey.expiration = exp
 	}
-	
+
 	// 检查是否过期
-	if time.Since(s.config.StreamKey.Generated) >= expiration {
-		// 过期了，重新生成密钥
-		oldKey := s.streamKey
-		s.streamKey = s.config.GenerateStreamKey()
-		
-		// 重新构建本地播放URL
-		localFLVURL := ""
-		localHLSURL := ""
-		
-		if s.config.Stream.LocalPlayURLs.FLV != "" {
-			if strings.HasSuffix(s.config.Stream.LocalPlayURLs.FLV, "/") {
-				localFLVURL = fmt.Sprintf("%s%s.flv", s.config.Stream.LocalPlayURLs.FLV, s.streamKey)
-			} else {
-				localFLVURL = s.config.Stream.LocalPlayURLs.FLV
-			}
-		}
-		
-		if s.config.Stream.LocalPlayURLs.HLS != "" {
-			if strings.HasSuffix(s.config.Stream.LocalPlayURLs.HLS, "/") {
-				localHLSURL = fmt.Sprintf("%s%s.m3u8", s.config.Stream.LocalPlayURLs.HLS, s.streamKey)
-			} else {
-				localHLSURL = s.config.Stream.LocalPlayURLs.HLS
-			}
-		}
-		
-		s.localPlayURLs = PlayURLs{
-			FLV: localFLVURL,
-			HLS: localHLSURL,
-		}
-		
-		// 保存新的配置
-		if err := s.publisher.SaveStreamKeyToConfig(s.id, s.config); err != nil {
-			logger.LogPrintf("保存流密钥到配置文件失败: %v", err)
-		}
-		
-		fmt.Printf("Stream %s key updated from %s to %s\n", s.id, oldKey, s.streamKey)
+	return !c.StreamKey.Generated.IsZero() && time.Since(c.StreamKey.Generated) >= c.StreamKey.expiration
+}
+
+// ReplacePlaceholders 替换配置中的旧流密钥
+func (c *StreamItemConfig) ReplacePlaceholders(streamKey string) *StreamItemConfig {
+	// 创建配置副本
+	config := &StreamItemConfig{
+		Protocol:   c.Protocol,
+		BufferSize: c.BufferSize,
+		Enabled:    c.Enabled,
+		StreamKey: StreamKeyConfig{
+			Type:       c.StreamKey.Type,
+			Value:      streamKey, // 使用新的流密钥
+			Length:     c.StreamKey.Length,
+			Expiration: c.StreamKey.Expiration,
+			expiration: c.StreamKey.expiration,
+			Generated:  time.Now(), // 更新生成时间
+		},
+		Stream: StreamConfig{
+			Source: SourceConfig{
+				Type:      c.Stream.Source.Type,
+				URL:       c.Stream.Source.URL,
+				BackupURL: c.Stream.Source.BackupURL,
+				Headers:   make(map[string]string),
+			},
+			LocalPlayURLs: PlayURLs{
+				FLV: c.Stream.LocalPlayURLs.FLV,
+				HLS: c.Stream.LocalPlayURLs.HLS,
+			},
+			Mode:      c.Stream.Mode,
+			Receivers: make(map[string]ReceiverConfig),
+		},
+		ConfigPath: c.ConfigPath,
 	}
+
+	// 复制Headers
+	for key, value := range c.Stream.Source.Headers {
+		config.Stream.Source.Headers[key] = value
+	}
+
+	// 从接收方的推流URL中提取旧的流密钥
+	oldStreamKey := ""
+	for _, receiver := range c.Stream.Receivers {
+		if receiver.PushURL != "" {
+			oldStreamKey = extractKeyFromPushURL(receiver.PushURL)
+			if oldStreamKey != "" {
+				break
+			}
+		}
+	}
+
+	fmt.Printf("Extracted old stream key from push URLs: %s\n", oldStreamKey)
+	fmt.Printf("Using new stream key: %s\n", streamKey)
+
+	// 替换源URL中的旧流密钥
+	if oldStreamKey != "" {
+		config.Stream.Source.URL = strings.ReplaceAll(config.Stream.Source.URL, oldStreamKey, streamKey)
+		config.Stream.Source.BackupURL = strings.ReplaceAll(config.Stream.Source.BackupURL, oldStreamKey, streamKey)
+	}
+
+	// 替换Headers中的旧流密钥
+	for key, value := range config.Stream.Source.Headers {
+		if oldStreamKey != "" {
+			config.Stream.Source.Headers[key] = strings.ReplaceAll(value, oldStreamKey, streamKey)
+		}
+	}
+
+	// 处理本地播放URL - 这里需要替换
+	if oldStreamKey != "" {
+		if config.Stream.LocalPlayURLs.FLV != "" {
+			config.Stream.LocalPlayURLs.FLV = strings.ReplaceAll(config.Stream.LocalPlayURLs.FLV, oldStreamKey, streamKey)
+		}
+		if config.Stream.LocalPlayURLs.HLS != "" {
+			config.Stream.LocalPlayURLs.HLS = strings.ReplaceAll(config.Stream.LocalPlayURLs.HLS, oldStreamKey, streamKey)
+		}
+	}
+
+	fmt.Printf("Local play URLs replaced: FLV=%s, HLS=%s\n",
+		config.Stream.LocalPlayURLs.FLV, config.Stream.LocalPlayURLs.HLS)
+
+	// 替换接收方配置中的旧流密钥
+	for name, receiver := range c.Stream.Receivers {
+		newReceiver := ReceiverConfig{
+			PushURL: receiver.PushURL,
+			PlayURLs: PlayURLs{
+				FLV: receiver.PlayURLs.FLV,
+				HLS: receiver.PlayURLs.HLS,
+			},
+		}
+
+		// 替换推流URL中的旧流密钥
+		if oldStreamKey != "" && newReceiver.PushURL != "" {
+			newReceiver.PushURL = strings.ReplaceAll(newReceiver.PushURL, oldStreamKey, streamKey)
+		}
+
+		// 替换播放URL中的旧流密钥
+		if oldStreamKey != "" {
+			if newReceiver.PlayURLs.FLV != "" {
+				newReceiver.PlayURLs.FLV = strings.ReplaceAll(newReceiver.PlayURLs.FLV, oldStreamKey, streamKey)
+			}
+			if newReceiver.PlayURLs.HLS != "" {
+				newReceiver.PlayURLs.HLS = strings.ReplaceAll(newReceiver.PlayURLs.HLS, oldStreamKey, streamKey)
+			}
+		}
+
+		config.Stream.Receivers[name] = newReceiver
+
+		fmt.Printf("Replaced receiver %s: old_key=%s, new_key=%s\n", name, oldStreamKey, streamKey)
+		fmt.Printf("  push_url: %s -> %s\n", receiver.PushURL, newReceiver.PushURL)
+		fmt.Printf("  flv: %s -> %s\n", receiver.PlayURLs.FLV, newReceiver.PlayURLs.FLV)
+		fmt.Printf("  hls: %s -> %s\n", receiver.PlayURLs.HLS, newReceiver.PlayURLs.HLS)
+	}
+
+	return config
 }

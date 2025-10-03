@@ -57,8 +57,8 @@ func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 获取publisher路径前缀
 	prefix := "/publisher"
 	pub := h.getPublisher()
-	if pub != nil {
-		prefix = pub.config.GetPath()
+	if pub != nil && pub.config != nil {
+		prefix = pub.config.Path
 	}
 	
 	// 检查请求路径是否匹配publisher路径前缀
@@ -220,7 +220,7 @@ func (h *HTTPHandler) createStream(w http.ResponseWriter, r *http.Request, pub *
 	}
 	
 	// 创建一个临时配置对象来传递给AddStream
-	tempConfig := &Config{
+	tempConfig := &StreamItemConfig{
 		Stream: streamConfig,
 	}
 	

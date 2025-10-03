@@ -50,7 +50,23 @@ type StreamConfig struct {
 	Receivers     map[string]ReceiverConfig `yaml:"receivers" json:"receivers"`             // 接收方配置
 }
 
-// Config 推流器配置
+// StreamItemConfig 定义单个流的完整配置
+type StreamItemConfig struct {
+	Protocol   string          `yaml:"protocol" json:"protocol"`       // 推流协议: go, ffmpeg
+	BufferSize int             `yaml:"buffer_size" json:"buffer_size"` // 缓冲区大小
+	Enabled    bool            `yaml:"enabled" json:"enabled"`         // 是否启用
+	StreamKey  StreamKeyConfig `yaml:"streamkey" json:"streamkey"`     // 流密钥配置
+	Stream     StreamConfig    `yaml:"stream" json:"stream"`           // 流配置
+	ConfigPath string          `yaml:"-" json:"-"`                     // 配置文件路径
+}
+
+// PublisherConfig 推流器配置
+type PublisherConfig struct {
+	Path   string                       `yaml:"path" json:"path"`   // 新增 path
+	Streams map[string]*StreamItemConfig `yaml:"-" json:"-"`         // 流配置映射
+}
+
+// Config 推流器配置（保持兼容性）
 type Config struct {
 	Path       string          `yaml:"path" json:"path"`               // 新增 path
 	Protocol   string          `yaml:"protocol" json:"protocol"`       // 推流协议: go, ffmpeg

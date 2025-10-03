@@ -308,19 +308,8 @@ func RegisterJXAndProxyMux(mux *http.ServeMux, cfg *config.Config) {
 	mux.Handle(jxPath, SecurityHeaders(http.HandlerFunc(jxHandler.Handle)))
 
 	// 注册publisher路由
-	if len(cfg.Publisher) > 0 {
-		// 检查是否有启用的publisher
-		enabled := false
-		for _, pubCfg := range cfg.Publisher {
-			if pubCfg.Enabled {
-				enabled = true
-				break
-			}
-		}
-		
-		if enabled {
-			// Publisher路由将在main.go中注册，因为需要publisher实例
-		}
+	if hasEnabledPublisher(cfg) {
+		// Publisher路由将在main.go中注册，因为需要publisher实例
 	}
 
 	client := httpclient.NewHTTPClient(cfg, nil)
@@ -347,24 +336,37 @@ func RegisterJXAndProxyMux(mux *http.ServeMux, cfg *config.Config) {
 	}
 }
 
+// hasEnabledPublisher checks if there are any enabled publishers in the config
+func hasEnabledPublisher(cfg *config.Config) bool {
+	if len(cfg.Publisher) == 0 {
+		return false
+	}
+	
+	for name, pubCfg := range cfg.Publisher {
+		// 跳过 path 字段
+		if name == "path" {
+			continue
+		}
+		
+		// 检查配置是否启用
+		if configMap, ok := pubCfg.(map[string]interface{}); ok {
+			if enabledVal, ok := configMap["enabled"]; ok {
+				if enabledBool, ok := enabledVal.(bool); ok && enabledBool {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // 全功能 = monitor/web + jx + 默认代理
 func RegisterFullMux(mux *http.ServeMux, cfg *config.Config) {
 	RegisterMonitorWebMux(mux, cfg)
 	RegisterJXAndProxyMux(mux, cfg)
 	
 	// 注册publisher路由
-	if len(cfg.Publisher) > 0 {
-		// 检查是否有启用的publisher
-		enabled := false
-		for _, pubCfg := range cfg.Publisher {
-			if pubCfg.Enabled {
-				enabled = true
-				break
-			}
-		}
-		
-		if enabled {
-			// Publisher路由将在main.go中注册，因为需要publisher实例
-		}
+	if hasEnabledPublisher(cfg) {
+		// Publisher路由将在main.go中注册，因为需要publisher实例
 	}
 }
