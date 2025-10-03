@@ -61,6 +61,9 @@ type Stream struct {
 	
 	// HLS推流器
 	hlsPusher *HLSPusher
+	
+	// 流源
+	source StreamSource
 }
 
 // Client 客户端结构
@@ -109,6 +112,21 @@ func (s *Stream) Start() {
 	s.running = true
 	s.done = make(chan struct{})
 	
+	// 根据源类型创建对应的流源
+	sourceURL := s.config.Stream.Source.URL
+	switch s.config.Stream.Source.Type {
+	case "rtsp":
+		// 对于RTSP源，我们可能需要支持备份URL
+		s.source = NewRTSPSource(sourceURL, "") // 可以扩展支持备份URL
+	case "http", "https":
+		s.source = NewHTTPSource(sourceURL)
+	case "file":
+		s.source = NewFileSource(sourceURL)
+	default:
+		logger.LogPrintf("Unsupported stream source type: %s", s.config.Stream.Source.Type)
+		return
+	}
+	
 	// 启动拉流协程
 	go s.pullStream()
 	
@@ -142,6 +160,11 @@ func (s *Stream) Stop() {
 	s.running = false
 	close(s.done)
 	
+	// 停止流源
+	if s.source != nil {
+		s.source.Close()
+	}
+	
 	// 停止HLS推流器
 	if s.hlsPusher != nil {
 		s.hlsPusher.Stop()
@@ -157,6 +180,30 @@ func (s *Stream) Stop() {
 	
 	// 清空客户端列表
 	s.clients = make(map[string]*Client)
+}
+
+// pullStream 从源地址拉取流
+func (s *Stream) pullStream() {
+	if s.source == nil {
+		logger.LogPrintf("Stream %s has no source configured", s.id)
+		return
+	}
+	
+	// 从流源读取数据包并推送到缓冲区
+	for {
+		select {
+		case <-s.done:
+			return
+		case packet, ok := <-s.source.Packets():
+			if !ok {
+				// 流源已关闭
+				logger.LogPrintf("Stream source for %s closed", s.id)
+				return
+			}
+			// 将数据推送到缓冲区
+			s.PushData(packet.Data)
+		}
+	}
 }
 
 // AddClient 添加客户端

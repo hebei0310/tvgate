@@ -89,7 +89,6 @@ func (h *HLSPusher) Push(rtmpURL string) error {
 				}
 				
 				// 直接将数据写入RTMP连接
-				// 这是一个非常简化的实现，实际应用中需要根据数据类型发送不同的RTMP消息
 				_, err = conn.NetConn().Write(data)
 				if err != nil {
 					fmt.Printf("发送RTMP数据失败: %v\n", err)
