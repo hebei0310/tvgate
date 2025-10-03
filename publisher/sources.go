@@ -281,8 +281,7 @@ func (h *HTTPSource) handleHLSStream() {
 		Timeout: 30 * time.Second,
 	}
 	
-	processedSegments := make(map[string]time.Time) // 记录已处理的片段和处理时间
-	cleanupInterval := 10 * time.Minute              // 清理间隔
+	processedSegments := make(map[string]bool) // 记录已处理的片段
 	
 	for {
 		// 检查是否应该关闭
@@ -290,11 +289,6 @@ func (h *HTTPSource) handleHLSStream() {
 		case <-h.closed:
 			return
 		default:
-		}
-		
-		// 定期清理处理记录，避免内存泄漏
-		if time.Now().Sub(getOldestSegmentTime(processedSegments)) > cleanupInterval {
-			cleanupOldSegments(processedSegments, cleanupInterval)
 		}
 		
 		// 获取M3U8播放列表
@@ -347,7 +341,7 @@ func (h *HTTPSource) handleHLSStream() {
 			}
 			
 			// 检查片段是否已经处理过
-			if _, exists := processedSegments[tsURL]; exists {
+			if processedSegments[tsURL] {
 				continue
 			}
 			
@@ -364,35 +358,26 @@ func (h *HTTPSource) handleHLSStream() {
 				continue
 			}
 			
-			// 读取并发送TS片段数据
-			buf := make([]byte, 4096)
-			totalBytes := 0
-			for {
-				n, err := tsResp.Body.Read(buf)
-				if err != nil && err != io.EOF {
-					log.Printf("TS segment read error: %v", err)
-					break
-				}
-				
-				if n > 0 {
-					totalBytes += n
-					select {
-					case h.packetCh <- Packet{Data: buf[:n]}:
-						// 数据已发送
-					case <-h.closed:
-						tsResp.Body.Close()
-						return
-					}
-				}
-				
-				if err == io.EOF {
-					break
+			// 读取完整的TS片段数据
+			tsData, err := io.ReadAll(tsResp.Body)
+			tsResp.Body.Close()
+			if err != nil {
+				log.Printf("Failed to read TS segment data: %v", err)
+				continue
+			}
+			
+			// 将完整的TS片段数据发送到通道
+			totalBytes := len(tsData)
+			if totalBytes > 0 {
+				select {
+				case h.packetCh <- Packet{Data: tsData}:
+					log.Printf("Sent complete TS segment (%d bytes): %s", totalBytes, tsURL)
+				case <-h.closed:
+					return
 				}
 			}
 			
-			tsResp.Body.Close()
-			log.Printf("Sent TS segment (%d bytes): %s", totalBytes, tsURL)
-			processedSegments[tsURL] = time.Now()
+			processedSegments[tsURL] = true
 			newSegments++
 		}
 		
@@ -403,27 +388,6 @@ func (h *HTTPSource) handleHLSStream() {
 		case <-h.closed:
 			return
 		case <-time.After(2 * time.Second):
-		}
-	}
-}
-
-// getOldestSegmentTime 获取处理片段中最旧的时间
-func getOldestSegmentTime(segments map[string]time.Time) time.Time {
-	oldest := time.Now()
-	for _, t := range segments {
-		if t.Before(oldest) {
-			oldest = t
-		}
-	}
-	return oldest
-}
-
-// cleanupOldSegments 清理旧的片段记录
-func cleanupOldSegments(segments map[string]time.Time, interval time.Duration) {
-	threshold := time.Now().Add(-interval)
-	for url, t := range segments {
-		if t.Before(threshold) {
-			delete(segments, url)
 		}
 	}
 }
