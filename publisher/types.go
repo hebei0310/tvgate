@@ -352,3 +352,18 @@ func (c *StreamItemConfig) IsStreamKeyExpired() bool {
 	// 检查是否过期
 	return !c.StreamKey.Generated.IsZero() && time.Since(c.StreamKey.Generated) >= c.StreamKey.expiration
 }
+
+// OnRTMPConnected RTMP连接建立事件
+func (sp *StreamPublisher) OnRTMPConnected(url string) {
+	fmt.Printf("RTMP连接已建立: %s\n", url)
+}
+
+// OnRTMPDisconnected RTMP连接断开事件
+func (sp *StreamPublisher) OnRTMPDisconnected(url string) {
+	fmt.Printf("RTMP连接已断开: %s\n", url)
+}
+
+// OnRTMPDataSent RTMP数据发送事件
+func (sp *StreamPublisher) OnRTMPDataSent(url string, bytes int) {
+	// 可以在这里添加统计数据或其他处理逻辑
+}

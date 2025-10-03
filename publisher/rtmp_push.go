@@ -66,36 +66,50 @@ func (h *HLSPusher) Push(rtmpURL string) error {
 	
 	fmt.Printf("RTMP连接已建立: %s\n", u.Host)
 	
+	// 发送RTMP连接成功的事件
+	h.stream.publisher.OnRTMPConnected(rtmpURL)
+	
 	// 启动一个goroutine来读取流数据并推送到RTMP
 	go func() {
 		defer func() {
 			conn.Close()
 			fmt.Printf("RTMP推流已停止: %s\n", rtmpURL)
+			// 发送RTMP断开连接的事件
+			h.stream.publisher.OnRTMPDisconnected(rtmpURL)
 		}()
 
 		// 从流中读取数据并推送到RTMP服务器
-		// 注意：这是一个简化的实现，实际应用中需要正确解析和封装音视频数据
+		totalBytes := 0
 		for {
 			select {
 			case <-h.done:
 				fmt.Printf("收到停止信号，RTMP推流已停止: %s\n", rtmpURL)
 				return
 			case data := <-h.stream.buffer:
+				// 检查数据是否为空
+				if len(data) == 0 {
+					continue
+				}
+				
 				// 发送数据到RTMP服务器
-				err := conn.NetConn().SetWriteDeadline(time.Now().Add(5 * time.Second))
+				err := conn.NetConn().SetWriteDeadline(time.Now().Add(30 * time.Second))
 				if err != nil {
 					fmt.Printf("设置写入超时失败: %v\n", err)
 					return
 				}
 				
 				// 直接将数据写入RTMP连接
-				_, err = conn.NetConn().Write(data)
+				n, err := conn.NetConn().Write(data)
 				if err != nil {
 					fmt.Printf("发送RTMP数据失败: %v\n", err)
 					return
 				}
 				
-				fmt.Printf("推送 %d 字节数据到 %s\n", len(data), rtmpURL)
+				totalBytes += n
+				fmt.Printf("推送 %d 字节数据到 %s (总计: %d)\n", n, rtmpURL, totalBytes)
+				
+				// 发送RTMP数据推送事件
+				h.stream.publisher.OnRTMPDataSent(rtmpURL, n)
 			}
 		}
 	}()
@@ -124,31 +138,25 @@ func (h *HLSPusher) pushStream() {
 			fmt.Printf("RTMP推流失败: %v\n", err)
 		}
 	default:
-		// 默认实现，模拟推流
-		h.simulatePush()
-	}
-}
-
-// simulatePush 模拟推流过程（用于测试或非RTMP协议）
-func (h *HLSPusher) simulatePush() {
-	// 启动一个goroutine来读取流数据并推送到目标地址
-	go func() {
-		defer func() {
-			fmt.Printf("模拟推流已停止: %s\n", h.pushURL)
-		}()
-		
-		// 从流中读取数据并模拟推送
-		for {
-			select {
-			case <-h.done:
-				fmt.Printf("收到停止信号，模拟推流已停止: %s\n", h.pushURL)
-				return
-			case data := <-h.stream.buffer:
-				// 这里应该从实际的流中读取数据并推送到目标服务器
-				fmt.Printf("推送 %d 字节数据到 %s\n", len(data), h.pushURL)
+		// 默认实现，从流中读取数据
+		go func() {
+			defer func() {
+				fmt.Printf("推流已停止: %s\n", h.pushURL)
+			}()
+			
+			// 从流中读取数据并推送
+			for {
+				select {
+				case <-h.done:
+					fmt.Printf("收到停止信号，推流已停止: %s\n", h.pushURL)
+					return
+				case data := <-h.stream.buffer:
+					// 这里应该从实际的流中读取数据并推送到目标服务器
+					fmt.Printf("推送 %d 字节数据到 %s\n", len(data), h.pushURL)
+				}
 			}
-		}
-	}()
+		}()
+	}
 }
 
 // Stop 停止HLS推流
